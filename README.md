@@ -24,9 +24,10 @@ ijevim emacs
 ijevim <file>
 ```
 
-## Keybind specification
+## Documentation
 
-- See [docs/keybindings.md](docs/keybindings.md) for the current keybinding specification.
+- [Documentation site](https://ijevim-org.github.io/)
+- [Keybinding specification](https://ijevim-org.github.io/keybindings)
 
 ## Install
 
@@ -36,8 +37,8 @@ cargo install ijevim
 
 ## キーマップ互換レベル
 
-- [Vim キーマップ互換レベル](docs/keymap-vim.md)
-- [Emacs キーマップ互換レベル](docs/keymap-emacs.md)
+- [Vim キーマップ互換レベル](https://ijevim-org.github.io/keymap-vim)
+- [Emacs キーマップ互換レベル](https://ijevim-org.github.io/keymap-emacs)
 
 ## Development
 
