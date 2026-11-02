@@ -349,7 +349,7 @@ impl Editor {
         loop {
             if direction > 0 {
                 current_col += 1;
-                if current_col >= self.engine.buffer.line_char_len(current_line) {
+                if current_col >= self.engine.buffer.line_content_len(current_line) {
                     current_line += 1;
                     if current_line > self.engine.buffer.line_count() {
                         break;
@@ -362,11 +362,7 @@ impl Editor {
                         break;
                     }
                     current_line -= 1;
-                    current_col = self
-                        .engine
-                        .buffer
-                        .line_char_len(current_line)
-                        .saturating_sub(1);
+                    current_col = self.engine.buffer.line_max_col(current_line);
                 } else {
                     current_col -= 1;
                 }

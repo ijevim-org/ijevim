@@ -246,15 +246,8 @@ impl Editor {
                 let count = self.take_count();
                 let target = (self.engine.state.cursor.line + count - 1)
                     .min(self.engine.buffer.line_count());
-                let line = self.engine.buffer.get_line(target);
-                let line_char_len = self.engine.buffer.line_char_len(target);
-                let end_col = if line_char_len > 0 && line.ends_with('\n') {
-                    line_char_len.saturating_sub(2)
-                } else {
-                    line_char_len.saturating_sub(1)
-                };
                 self.engine.state.cursor.line = target;
-                self.engine.state.cursor.col = end_col;
+                self.engine.state.cursor.col = self.engine.buffer.line_max_col(target);
                 self.needs_render = true;
             }
             KeyCode::Char('D') => {
@@ -476,8 +469,7 @@ impl Editor {
                         None => self.engine.buffer.line_count().max(1),
                     };
                     self.engine.state.cursor.line = target;
-                    let len = self.engine.buffer.line_char_len(target);
-                    self.engine.state.cursor.col = len.saturating_sub(1);
+                    self.engine.state.cursor.col = self.engine.buffer.line_max_col(target);
                     self.needs_render = true;
                 }
                 KeyCode::Char('%') => {
@@ -585,12 +577,12 @@ impl Editor {
                     let count = self.take_count();
                     for _ in 0..count {
                         self.toggle_case_char();
-                        let line_len = self
+                        let max_col = self
                             .engine
                             .buffer
-                            .line_char_len(self.engine.state.cursor.line);
+                            .line_max_col(self.engine.state.cursor.line);
                         self.engine.state.cursor.col =
-                            (self.engine.state.cursor.col + 1).min(line_len.saturating_sub(1));
+                            (self.engine.state.cursor.col + 1).min(max_col);
                     }
                     self.engine.dot_last_action = Some(DotAction::ToggleCase);
                     self.needs_render = true;

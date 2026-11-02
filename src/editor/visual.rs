@@ -76,36 +76,31 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('l') => {
-                let line_len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
-                self.engine.state.cursor.col =
-                    (self.engine.state.cursor.col + 1).min(line_len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = (self.engine.state.cursor.col + 1).min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('j') => {
                 let line_count = self.engine.buffer.line_count();
                 self.engine.state.cursor.line = (self.engine.state.cursor.line + 1).min(line_count);
-                let len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .get_line(self.engine.state.cursor.line)
-                    .len();
-                self.engine.state.cursor.col =
-                    self.engine.state.cursor.col.min(len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('k') => {
                 self.engine.state.cursor.line =
                     self.engine.state.cursor.line.saturating_sub(1).max(1);
-                let len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .get_line(self.engine.state.cursor.line)
-                    .len();
-                self.engine.state.cursor.col =
-                    self.engine.state.cursor.col.min(len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('0') => {
@@ -119,16 +114,10 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('$') => {
-                let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-                let line_char_len = self
+                self.engine.state.cursor.col = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
-                self.engine.state.cursor.col = if line_char_len > 0 && line.ends_with('\n') {
-                    line_char_len.saturating_sub(2)
-                } else {
-                    line_char_len.saturating_sub(1)
-                };
+                    .line_max_col(self.engine.state.cursor.line);
                 self.needs_render = true;
             }
             KeyCode::Char('I') if self.engine.state.visual_type == Some(VisualType::Block) => {

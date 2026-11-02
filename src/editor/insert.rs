@@ -127,7 +127,7 @@ impl Editor {
             .state
             .cursor
             .col
-            .min(self.engine.buffer.line_char_len(line));
+            .min(self.engine.buffer.line_content_len(line));
         if col == 0 {
             return;
         }
@@ -250,7 +250,7 @@ impl Editor {
                 // ── Multi-char Replace mode (R) ───────────────────
                 let line = self.engine.state.cursor.line;
                 let col = self.engine.state.cursor.col;
-                let old_char = if col < self.engine.buffer.line_char_len(line) {
+                let old_char = if col < self.engine.buffer.line_content_len(line) {
                     let line_str = self.engine.buffer.get_line(line);
                     line_str.chars().nth(col).unwrap_or('\0')
                 } else {
