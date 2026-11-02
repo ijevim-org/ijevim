@@ -141,36 +141,34 @@ impl Editor {
             }
             KeyCode::Char('l') => {
                 let count = self.take_count();
-                let line_len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
+                    .line_max_col(self.engine.state.cursor.line);
                 self.engine.state.cursor.col =
-                    (self.engine.state.cursor.col + count).min(line_len.saturating_sub(1));
+                    (self.engine.state.cursor.col + count).min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('j') => {
                 let count = self.take_count();
                 self.engine.state.cursor.line =
                     (self.engine.state.cursor.line + count).min(line_count);
-                let len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
-                self.engine.state.cursor.col =
-                    self.engine.state.cursor.col.min(len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('k') => {
                 let count = self.take_count();
                 self.engine.state.cursor.line =
                     self.engine.state.cursor.line.saturating_sub(count).max(1);
-                let len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
-                self.engine.state.cursor.col =
-                    self.engine.state.cursor.col.min(len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('i') => {
@@ -194,7 +192,7 @@ impl Editor {
                     < self
                         .engine
                         .buffer
-                        .line_char_len(self.engine.state.cursor.line)
+                        .line_content_len(self.engine.state.cursor.line)
                 {
                     self.engine.state.cursor.col += 1;
                 }
@@ -213,7 +211,7 @@ impl Editor {
                 let line_len = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
+                    .line_content_len(self.engine.state.cursor.line);
                 self.engine.state.cursor.col = line_len;
                 self.engine.state.mode = Mode::Insert;
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
@@ -638,10 +636,8 @@ impl Editor {
                 KeyCode::Char('b') => {
                     let line = self.engine.state.cursor.line;
                     let col = self.engine.state.cursor.col;
-                    let (word, start, _) = self.engine.buffer.get_word_range(line, col);
-                    if !word.is_empty() {
-                        self.yank_cols(register, start, col);
-                    }
+                    let start = self.word_back_start(line, col);
+                    self.yank_cols(register, start, col);
                 }
                 KeyCode::Char('j') => {
                     let line = self.engine.state.cursor.line;
@@ -649,7 +645,7 @@ impl Editor {
                 }
                 KeyCode::Char('k') => {
                     let line = self.engine.state.cursor.line;
-                    let start = line.saturating_sub(count.max(1).saturating_sub(1));
+                    let start = line.saturating_sub(count.max(1)).max(1);
                     self.yank_lines_range(register, start, line);
                 }
                 KeyCode::Char('G') => {
@@ -712,10 +708,8 @@ impl Editor {
                 KeyCode::Char('b') => {
                     let line = self.engine.state.cursor.line;
                     let col = self.engine.state.cursor.col;
-                    let (word, start, _) = self.engine.buffer.get_word_range(line, col);
-                    if !word.is_empty() {
-                        self.delete_cols(register, start, col);
-                    }
+                    let start = self.word_back_start(line, col);
+                    self.delete_cols(register, start, col);
                 }
                 KeyCode::Char('j') => {
                     let line = self.engine.state.cursor.line;
@@ -723,7 +717,7 @@ impl Editor {
                 }
                 KeyCode::Char('k') => {
                     let line = self.engine.state.cursor.line;
-                    let start = line.saturating_sub(count.max(1).saturating_sub(1));
+                    let start = line.saturating_sub(count.max(1)).max(1);
                     self.delete_lines_range(register, start, line);
                 }
                 KeyCode::Char('G') => {
@@ -833,10 +827,8 @@ impl Editor {
                 KeyCode::Char('b') => {
                     let line = self.engine.state.cursor.line;
                     let col = self.engine.state.cursor.col;
-                    let (word, start, _) = self.engine.buffer.get_word_range(line, col);
-                    if !word.is_empty() {
-                        self.delete_cols(register, start, col);
-                    }
+                    let start = self.word_back_start(line, col);
+                    self.delete_cols(register, start, col);
                     self.enter_insert_after_change();
                 }
                 KeyCode::Char('i') => {
@@ -1083,11 +1075,11 @@ impl Editor {
 
         let line_count = self.engine.buffer.line_count().max(1);
         self.engine.state.cursor.line = restore_line.min(line_count);
-        let len = self
+        let max_col = self
             .engine
             .buffer
-            .line_char_len(self.engine.state.cursor.line);
-        self.engine.state.cursor.col = self.engine.state.cursor.col.min(len.saturating_sub(1));
+            .line_max_col(self.engine.state.cursor.line);
+        self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
         self.needs_render = true;
     }
 
@@ -1171,11 +1163,11 @@ impl Editor {
         if line > line_count {
             self.engine.state.cursor.line = line_count.max(1);
         }
-        let len = self
+        let max_col = self
             .engine
             .buffer
-            .line_char_len(self.engine.state.cursor.line);
-        self.engine.state.cursor.col = self.engine.state.cursor.col.min(len.saturating_sub(1));
+            .line_max_col(self.engine.state.cursor.line);
+        self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
         self.on_buffer_modified();
         Some(edit)
     }

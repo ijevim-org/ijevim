@@ -918,7 +918,9 @@ mod tests {
         editor.set_buffer_for_test("hello world foo\n");
         editor.engine.state.cursor.col = 0;
         editor.handle_normal(KeyCode::Char('w')).await;
-        assert_eq!(editor.engine.state.cursor.col, 5);
+        // `forward-word` lands on the start of the next word, not on the
+        // blank that separates them.
+        assert_eq!(editor.engine.state.cursor.col, 6);
     }
 
     #[tokio::test]

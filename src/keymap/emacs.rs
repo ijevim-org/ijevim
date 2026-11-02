@@ -43,7 +43,7 @@ impl KeymapHandler for EmacsKeymap {
                         return;
                     }
                     (true, KeyCode::Char('d')) => {
-                        editor.cursor_line_end();
+                        editor.cursor_line_end_point();
                         return;
                     }
                     // C-x u / C-x C-/: redo
@@ -81,7 +81,7 @@ impl KeymapHandler for EmacsKeymap {
                     editor.cursor_line_start();
                 }
                 (true, KeyCode::Char('e')) => {
-                    editor.cursor_line_end();
+                    editor.cursor_line_end_point();
                 }
                 (true, KeyCode::Char('d')) => {
                     editor.delete_char_forward();
@@ -191,7 +191,7 @@ impl KeymapHandler for EmacsKeymap {
                     editor.cursor_line_start();
                 }
                 (false, KeyCode::End) => {
-                    editor.cursor_line_end();
+                    editor.cursor_line_end_point();
                 }
                 (false, KeyCode::PageUp) => {
                     editor.scroll_up();

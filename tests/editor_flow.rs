@@ -300,7 +300,7 @@ async fn vim_w_word_forward() {
     ed.handle_key_for_test(KeyCode::Char('w'), KeyModifiers::NONE)
         .await;
     let (_, _, col, _) = ed.snapshot_for_test();
-    assert_eq!(col, 5, "w moved to space after 'hello'");
+    assert_eq!(col, 6, "w moves to the start of the next word");
 }
 
 #[tokio::test]
@@ -611,7 +611,7 @@ async fn emacs_meta_f_moves_word_forward() {
     ed.handle_key_for_test(KeyCode::Char('f'), KeyModifiers::ALT)
         .await;
     let (_, _, col, _) = ed.snapshot_for_test();
-    assert_eq!(col, 5, "M-f moved to space after 'hello'");
+    assert_eq!(col, 6, "M-f moves to the start of the next word");
 }
 
 #[tokio::test]
@@ -1698,7 +1698,7 @@ async fn yank_to_end_of_line_then_paste() {
 #[tokio::test]
 async fn change_to_end_of_line_enters_insert() {
     let mut ed = test_vim_editor("hello world\n");
-    type_keys(&mut ed, "wwc$").await;
+    type_keys(&mut ed, "wc$").await;
     press_key(&mut ed, KeyCode::Esc).await;
     let (buf, _, _, _) = ed.snapshot_for_test();
     assert_eq!(buf, "hello \n");
@@ -1711,17 +1711,4 @@ async fn operator_motions_are_undoable() {
     press_key(&mut ed, KeyCode::Char('u')).await;
     let (buf, _, _, _) = ed.snapshot_for_test();
     assert_eq!(buf, "1\n2\n3\n");
-}
-#[tokio::test]
-async fn dbg_change_dollar() {
-    let mut ed = test_vim_editor("hello world\n");
-    for c in "ww".chars() {
-        press_key(&mut ed, KeyCode::Char(c)).await;
-        let (buf, line, col, mode) = ed.snapshot_for_test();
-        eprintln!("after {:?}: buf={:?} line={} col={} mode={:?}", c, buf, line, col, mode);
-    }
-    press_key(&mut ed, KeyCode::Char('c')).await;
-    press_key(&mut ed, KeyCode::Char('$')).await;
-    let (buf, line, col, mode) = ed.snapshot_for_test();
-    eprintln!("after c$: buf={:?} line={} col={} mode={:?}", buf, line, col, mode);
 }

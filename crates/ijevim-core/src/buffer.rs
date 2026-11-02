@@ -61,6 +61,26 @@ impl TextBuffer {
         self.doc.line(line_number - 1).chars().count()
     }
 
+    /// Character count of a line excluding its trailing line terminator.
+    ///
+    /// [`line_char_len`](Self::line_char_len) follows ropey and counts the
+    /// `\n`. A normal-mode cursor must never sit on that newline, so cursor
+    /// bounds use this instead; the last valid column is `content_len - 1`.
+    pub fn line_content_len(&self, line_number: usize) -> usize {
+        if line_number < 1 || line_number > self.line_count() {
+            return 0;
+        }
+        let line = self.get_line(line_number);
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        line.chars().count()
+    }
+
+    /// Last valid normal-mode column of a line (0 for an empty line).
+    pub fn line_max_col(&self, line_number: usize) -> usize {
+        self.line_content_len(line_number).saturating_sub(1)
+    }
+
     /// Return the characters of a line as a `Vec<char>`.
     /// Use this instead of `get_line(n).chars().collect()` to avoid an
     /// intermediate `String` allocation — `RopeSlice` yields chars directly.

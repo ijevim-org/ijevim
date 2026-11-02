@@ -93,12 +93,11 @@ impl Editor {
     }
 
     pub(crate) fn cursor_right(&mut self, n: usize) {
-        let line_len = self
+        let max_col = self
             .engine
             .buffer
-            .line_char_len(self.engine.state.cursor.line);
-        self.engine.state.cursor.col =
-            (self.engine.state.cursor.col + n).min(line_len.saturating_sub(1));
+            .line_max_col(self.engine.state.cursor.line);
+        self.engine.state.cursor.col = (self.engine.state.cursor.col + n).min(max_col);
         self.needs_render = true;
     }
 
@@ -110,21 +109,21 @@ impl Editor {
     pub(crate) fn cursor_down(&mut self, n: usize) {
         let line_count = self.engine.buffer.line_count();
         self.engine.state.cursor.line = (self.engine.state.cursor.line + n).min(line_count);
-        let len = self
+        let max_col = self
             .engine
             .buffer
-            .line_char_len(self.engine.state.cursor.line);
-        self.engine.state.cursor.col = self.engine.state.cursor.col.min(len.saturating_sub(1));
+            .line_max_col(self.engine.state.cursor.line);
+        self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
         self.needs_render = true;
     }
 
     pub(crate) fn cursor_up(&mut self, n: usize) {
         self.engine.state.cursor.line = self.engine.state.cursor.line.saturating_sub(n).max(1);
-        let len = self
+        let max_col = self
             .engine
             .buffer
-            .line_char_len(self.engine.state.cursor.line);
-        self.engine.state.cursor.col = self.engine.state.cursor.col.min(len.saturating_sub(1));
+            .line_max_col(self.engine.state.cursor.line);
+        self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
         self.needs_render = true;
     }
 
@@ -133,70 +132,105 @@ impl Editor {
         self.needs_render = true;
     }
 
+    /// Vim's `$`: the cursor sits *on* the last character.
     pub(crate) fn cursor_line_end(&mut self) {
-        let line_len = self
+        self.engine.state.cursor.col = self
             .engine
             .buffer
-            .line_char_len(self.engine.state.cursor.line);
-        self.engine.state.cursor.col = line_len.saturating_sub(1);
+            .line_max_col(self.engine.state.cursor.line);
         self.needs_render = true;
+    }
+
+    /// Emacs' `C-e`: point rests *before* the newline, i.e. one past the last
+    /// character. Kept separate because the two editors disagree here.
+    pub(crate) fn cursor_line_end_point(&mut self) {
+        self.engine.state.cursor.col = self
+            .engine
+            .buffer
+            .line_content_len(self.engine.state.cursor.line);
+        self.needs_render = true;
+    }
+
+    /// First column of the next word, or the last column of the line when
+    /// there is none.
+    ///
+    /// Vim's `w` skips the rest of the current word *and* the blanks that
+    /// follow it; stopping at the first blank leaves the cursor in the gap
+    /// (which then breaks `db`, `cw`, ...).
+    pub(crate) fn word_forward_col(&self, line: usize, col: usize) -> usize {
+        let chars = self.engine.buffer.line_chars(line);
+        let content_len = self.engine.buffer.line_content_len(line);
+        let is_word = |c: char| !c.is_whitespace();
+
+        let mut i = col.min(content_len);
+        while i < content_len && is_word(chars[i]) {
+            i += 1;
+        }
+        while i < content_len && !is_word(chars[i]) {
+            i += 1;
+        }
+        i.min(content_len.saturating_sub(1))
+    }
+
+    /// First column of the word before the one under the cursor.
+    ///
+    /// Used by `b`, `db`, `cb`: the cursor must land on the start of the
+    /// preceding word, skipping the blanks in between.
+    pub(crate) fn word_back_start(&self, line: usize, col: usize) -> usize {
+        let chars = self.engine.buffer.line_chars(line);
+        if col == 0 || chars.is_empty() {
+            return 0;
+        }
+        let is_word = |c: char| !c.is_whitespace();
+
+        let mut i = col.saturating_sub(1).min(chars.len() - 1);
+        while i > 0 && !is_word(chars[i]) {
+            i -= 1;
+        }
+        while i > 0 && is_word(chars[i - 1]) {
+            i -= 1;
+        }
+        i
     }
 
     pub(crate) fn move_word_forward(&mut self) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        let chars: Vec<char> = self.engine.buffer.line_chars(line);
-
-        let mut i = col;
-        while i < chars.len() && chars[i].is_whitespace() {
-            i += 1;
-        }
-        while i < chars.len() && !chars[i].is_whitespace() {
-            i += 1;
-        }
-
-        if i < chars.len() {
-            self.engine.state.cursor.col = i;
-        }
+        self.engine.state.cursor.col = self.word_forward_col(line, col);
+        self.needs_render = true;
     }
 
     pub(crate) fn move_word_backward(&mut self) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        let chars: Vec<char> = self.engine.buffer.line_chars(line);
+        self.engine.state.cursor.col = self.word_back_start(line, col);
+        self.needs_render = true;
+    }
 
-        if col == 0 {
-            return;
+    /// Last column of the word the cursor is on (or of the next one).
+    pub(crate) fn word_end_col(&self, line: usize, col: usize) -> usize {
+        let chars = self.engine.buffer.line_chars(line);
+        let content_len = self.engine.buffer.line_content_len(line);
+        if content_len == 0 {
+            return 0;
         }
+        let is_word = |c: char| !c.is_whitespace();
 
-        let mut i = col - 1;
-        while i > 0 && chars[i].is_whitespace() {
-            i -= 1;
+        let mut i = col.min(content_len.saturating_sub(1));
+        while i < content_len && !is_word(chars[i]) {
+            i += 1;
         }
-        while i > 0 && !chars[i - 1].is_whitespace() {
-            i -= 1;
+        while i + 1 < content_len && is_word(chars[i + 1]) {
+            i += 1;
         }
-
-        self.engine.state.cursor.col = i;
+        i.min(content_len - 1)
     }
 
     pub(crate) fn move_word_end(&mut self) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        let chars: Vec<char> = self.engine.buffer.line_chars(line);
-
-        let mut i = col;
-        while i < chars.len() && chars[i].is_whitespace() {
-            i += 1;
-        }
-
-        while i < chars.len() && !chars[i].is_whitespace() {
-            i += 1;
-        }
-
-        if i > 0 && i <= chars.len() {
-            self.engine.state.cursor.col = i - 1;
-        }
+        self.engine.state.cursor.col = self.word_end_col(line, col);
+        self.needs_render = true;
     }
 
     pub(crate) fn find_char(&mut self, ch: char, till: bool, forward: bool) -> bool {
