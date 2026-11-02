@@ -161,8 +161,7 @@ impl Editor {
                 self.engine.buffer.delete(line, col - 1);
                 self.engine.buffer.insert_char(line, col - 1, c2);
                 self.engine.buffer.insert_char(line, col, c1);
-                self.engine.state.cursor.col =
-                    (col + 1).min(self.engine.buffer.line_max_col(line));
+                self.engine.state.cursor.col = (col + 1).min(self.engine.buffer.line_max_col(line));
                 self.on_buffer_modified();
             }
         }
@@ -234,7 +233,10 @@ impl Editor {
 
     pub(crate) fn kill_line(&mut self) {
         let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-        let end_col = self.engine.buffer.line_content_len(self.engine.state.cursor.line);
+        let end_col = self
+            .engine
+            .buffer
+            .line_content_len(self.engine.state.cursor.line);
         if self.engine.state.cursor.col < end_col {
             let deleted: String = line
                 .chars()
@@ -318,7 +320,10 @@ impl Editor {
 
     pub(crate) fn delete_char_forward(&mut self) {
         let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-        let content_len = self.engine.buffer.line_content_len(self.engine.state.cursor.line);
+        let content_len = self
+            .engine
+            .buffer
+            .line_content_len(self.engine.state.cursor.line);
         if self.engine.state.cursor.col < content_len {
             let deleted_char = line
                 .chars()

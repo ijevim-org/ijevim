@@ -145,8 +145,7 @@ impl Editor {
                     .engine
                     .buffer
                     .line_max_col(self.engine.state.cursor.line);
-                self.engine.state.cursor.col =
-                    (self.engine.state.cursor.col + count).min(max_col);
+                self.engine.state.cursor.col = (self.engine.state.cursor.col + count).min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('j') => {
@@ -247,8 +246,7 @@ impl Editor {
                 let target = (self.engine.state.cursor.line + count - 1)
                     .min(self.engine.buffer.line_count());
                 self.engine.state.cursor.line = target;
-                self.engine.state.cursor.col = self.engine.buffer.line_max_col(target);
-                self.needs_render = true;
+                self.cursor_line_end();
             }
             KeyCode::Char('D') => {
                 let count = self.take_count();
@@ -971,19 +969,16 @@ impl Editor {
         }
     }
 
-
     /// Enter Insert mode after a `c{motion}` deletion.
     fn enter_insert_after_change(&mut self) {
         self.engine.insert_state.accum.clear();
         self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
         let prev_mode = self.engine.state.mode;
         self.engine.state.mode = Mode::Insert;
-        self.engine
-            .plugin_manager
-            .emit(PluginEvent::ModeChange {
-                from: prev_mode,
-                to: Mode::Insert,
-            });
+        self.engine.plugin_manager.emit(PluginEvent::ModeChange {
+            from: prev_mode,
+            to: Mode::Insert,
+        });
         self.needs_render = true;
     }
 
@@ -1005,10 +1000,7 @@ impl Editor {
         if start >= end {
             return;
         }
-        let content = self
-            .engine
-            .buffer
-            .get_char_range(line, start, line, end);
+        let content = self.engine.buffer.get_char_range(line, start, line, end);
         let char_start = self.engine.buffer.line_to_char(line.saturating_sub(1)) + start;
         let mod_count = self.engine.buffer.modification_count();
         self.engine
@@ -1037,10 +1029,7 @@ impl Editor {
         if start >= end {
             return;
         }
-        let content = self
-            .engine
-            .buffer
-            .get_char_range(line, start, line, end);
+        let content = self.engine.buffer.get_char_range(line, start, line, end);
         self.engine.register.set(register, &content);
         self.needs_render = true;
     }

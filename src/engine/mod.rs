@@ -465,8 +465,12 @@ impl Engine {
                 self.state.file_path.take(),
                 self.state.cursor,
             );
-            // Update the inactive buffer we're leaving
-            self.inactive_buffers[current_focused] = current;
+            // Update the inactive buffer we're leaving. The slot may not exist
+            // yet when the focused window index is ahead of the buffer list.
+            match self.inactive_buffers.get_mut(current_focused) {
+                Some(slot) => *slot = current,
+                None => self.inactive_buffers.push(current),
+            }
             // Swap in the target buffer
             let target = self.inactive_buffers.remove(target_idx);
             self.buffer = target.0;
@@ -569,7 +573,10 @@ impl Engine {
     }
 
     /// Update window layout dimensions on terminal resize.
+    ///
+    /// Scales the existing splits; it must not rebuild the layout, or every
+    /// `:split` closes the moment the terminal is resized.
     pub fn update_window_layout(&mut self, rows: usize, cols: usize) {
-        self.window_layout = crate::types::WindowLayout::new_single(rows, cols);
+        self.window_layout.resize(rows, cols);
     }
 }

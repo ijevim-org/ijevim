@@ -121,6 +121,53 @@ impl WindowLayout {
         self.focused = focused_idx + 1;
     }
 
+    /// Re-tile the existing windows for a new terminal size.
+    ///
+    /// Every boundary is scaled proportionally, so splits survive a resize
+    /// instead of being replaced by a fresh single window (`new_single`),
+    /// which silently closed every split on each terminal resize.
+    pub fn resize(&mut self, rows: usize, cols: usize) {
+        if self.windows.is_empty() {
+            *self = WindowLayout::new_single(rows, cols);
+            return;
+        }
+        let content_rows = rows.saturating_sub(1);
+        let old_rows = self.windows.iter().map(|w| w.row_end).max().unwrap_or(0);
+        let old_cols = self.windows.iter().map(|w| w.col_end).max().unwrap_or(0);
+        if old_rows == 0 || old_cols == 0 {
+            return;
+        }
+        if old_rows == content_rows && old_cols == cols {
+            return;
+        }
+
+        // Floor-scaled boundaries keep adjacent windows exactly contiguous:
+        // `end(i) == start(i + 1)` stays true because both map through the
+        // same monotonic function.
+        let scale = |v: usize, old: usize, new: usize| -> usize {
+            if old == 0 {
+                0
+            } else {
+                v.saturating_mul(new) / old
+            }
+        };
+        for w in &mut self.windows {
+            w.row_start = scale(w.row_start, old_rows, content_rows);
+            w.row_end = scale(w.row_end, old_rows, content_rows);
+            w.col_start = scale(w.col_start, old_cols, cols);
+            w.col_end = scale(w.col_end, old_cols, cols);
+        }
+
+        // A collapsed window would be invisible and unfocusable.
+        if self
+            .windows
+            .iter()
+            .any(|w| w.row_end <= w.row_start || w.col_end <= w.col_start)
+        {
+            self.equalize(rows, cols);
+        }
+    }
+
     /// Close the focused window. If it's the last window, do nothing.
     pub fn close_focused(&mut self) {
         if self.windows.len() <= 1 {
@@ -720,4 +767,70 @@ pub enum DotAction {
     },
     /// `~` — toggle case of character under cursor.
     ToggleCase,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn windows_of_split(rows: usize, cols: usize) -> WindowLayout {
+        let mut layout = WindowLayout::new_single(rows, cols);
+        layout.split_horizontal();
+        layout
+    }
+
+    #[test]
+    fn resize_keeps_splits() {
+        let mut layout = windows_of_split(24, 80);
+        assert_eq!(layout.windows.len(), 2);
+
+        layout.resize(40, 100);
+
+        assert_eq!(layout.windows.len(), 2, "resize must not close splits");
+        for w in &layout.windows {
+            assert!(w.row_end > w.row_start, "window collapsed vertically");
+            assert!(w.col_end > w.col_start, "window collapsed horizontally");
+            assert_eq!(w.col_start, 0);
+            assert_eq!(w.col_end, 100);
+        }
+        assert_eq!(layout.windows[1].row_start, layout.windows[0].row_end);
+        assert_eq!(layout.windows[1].row_end, 39, "last row is the status bar");
+    }
+
+    #[test]
+    fn resize_keeps_vertical_splits_contiguous() {
+        let mut layout = WindowLayout::new_single(24, 80);
+        layout.split_vertical();
+        assert_eq!(layout.windows.len(), 2);
+
+        layout.resize(30, 120);
+
+        assert_eq!(layout.windows.len(), 2);
+        assert_eq!(layout.windows[1].col_start, layout.windows[0].col_end);
+        assert_eq!(layout.windows[1].col_end, 120);
+        assert_eq!(layout.windows[0].row_end, 29);
+    }
+
+    #[test]
+    fn resize_is_a_noop_when_size_is_unchanged() {
+        let mut layout = windows_of_split(24, 80);
+        let before = layout.windows.clone();
+        layout.resize(24, 80);
+        assert_eq!(layout.windows, before);
+    }
+
+    #[test]
+    fn resize_retiles_when_a_window_would_collapse() {
+        let mut layout = WindowLayout::new_single(24, 80);
+        layout.split_horizontal();
+        layout.split_horizontal();
+        assert_eq!(layout.windows.len(), 3);
+
+        layout.resize(4, 80);
+
+        assert_eq!(layout.windows.len(), 3);
+        for w in &layout.windows {
+            assert!(w.row_end > w.row_start, "no window may collapse to zero rows");
+        }
+    }
 }

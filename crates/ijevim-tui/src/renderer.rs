@@ -334,8 +334,7 @@ impl Renderer {
             }
 
             // Fill remainder with spaces — use display-width aware fill position
-            let content_display_width =
-                cells_display_width(&vline.styled_chars, state.tabstop);
+            let content_display_width = cells_display_width(&vline.styled_chars, state.tabstop);
             let last_col =
                 window.col_start + line_number_prefix + content_display_width.min(content_width);
             for col in last_col..window.col_end.min(total_cols) {
@@ -800,9 +799,8 @@ pub(crate) fn wrap_styled(
     let mut current: Vec<(char, CellStyle)> = Vec::new();
     let mut current_src: Vec<usize> = Vec::new();
     let mut current_width = 0usize;
-    let mut source_col = 0usize;
 
-    for (ch, style) in styled_chars {
+    for (source_col, (ch, style)) in styled_chars.iter().enumerate() {
         let mut ch_width = char_width_at(*ch, tabstop, current_width);
         if wrap && ch_width > 0 && current_width + ch_width > max_width && !current.is_empty() {
             rows.push(WrappedSegment {
@@ -823,7 +821,6 @@ pub(crate) fn wrap_styled(
             current_src.push(source_col);
         }
         current_width += ch_width;
-        source_col += 1;
     }
 
     if !current.is_empty() || rows.is_empty() {

@@ -1692,7 +1692,11 @@ async fn yank_to_end_of_line_then_paste() {
 
     type_keys(&mut ed, "p").await;
     let (buf, _, _, _) = ed.snapshot_for_test();
-    assert!(buf.contains("hello world"), "pasted content missing: {:?}", buf);
+    assert!(
+        buf.contains("hello world"),
+        "pasted content missing: {:?}",
+        buf
+    );
 }
 
 #[tokio::test]
@@ -1711,4 +1715,73 @@ async fn operator_motions_are_undoable() {
     press_key(&mut ed, KeyCode::Char('u')).await;
     let (buf, _, _, _) = ed.snapshot_for_test();
     assert_eq!(buf, "1\n2\n3\n");
+}
+
+// ── Cursor bounds never include the newline (B31) ───────────────────
+
+#[tokio::test]
+async fn cursor_never_rests_on_newline() {
+    let mut ed = test_vim_editor("abc\n");
+    for _ in 0..10 {
+        press_key(&mut ed, KeyCode::Char('l')).await;
+    }
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(
+        col, 2,
+        "`l` must stop on the last character, not the newline"
+    );
+}
+
+#[tokio::test]
+async fn line_end_motion_lands_on_last_char() {
+    let mut ed = test_vim_editor("hello world\n");
+    press_key(&mut ed, KeyCode::Char('$')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 10);
+
+    // `x` at `$` must delete 'd', never the line terminator.
+    press_key(&mut ed, KeyCode::Char('x')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello worl\n");
+}
+
+#[tokio::test]
+async fn motions_on_empty_line_do_not_panic() {
+    let mut ed = test_vim_editor("\n");
+    type_keys(&mut ed, "llll$0jjkweb").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\n");
+}
+
+#[tokio::test]
+async fn vertical_motion_clamps_to_shorter_line() {
+    let mut ed = test_vim_editor("longer line\nx\n");
+    press_key(&mut ed, KeyCode::Char('$')).await;
+    press_key(&mut ed, KeyCode::Char('j')).await;
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(line, 2);
+    assert_eq!(
+        col, 0,
+        "j must clamp to the last character of the target line"
+    );
+}
+
+#[tokio::test]
+async fn delete_to_end_of_line_is_undoable() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "wd$").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello \n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n");
+}
+
+#[tokio::test]
+async fn line_end_on_tabbed_line_stops_before_newline() {
+    let mut ed = test_vim_editor("\tab\n");
+    press_key(&mut ed, KeyCode::Char('$')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 2, "the tab counts as one character");
 }
