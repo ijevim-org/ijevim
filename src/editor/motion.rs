@@ -157,31 +157,61 @@ impl Editor {
     /// Vim's `w` skips the rest of the current word *and* the blanks that
     /// follow it; stopping at the first blank leaves the cursor in the gap
     /// (which then breaks `db`, `cw`, ...).
-    pub(crate) fn word_forward_col(&self, line: usize, col: usize) -> usize {
+    pub(crate) fn word_forward_target(&self, line: usize, col: usize, big: bool) -> Option<usize> {
         let chars = self.engine.buffer.line_chars(line);
         let content_len = self.engine.buffer.line_content_len(line);
-        let is_word = |c: char| !c.is_whitespace();
+        let is_word = |c: char| {
+            if big {
+                !c.is_whitespace()
+            } else {
+                c.is_alphanumeric() || c == '_'
+            }
+        };
 
         let mut i = col.min(content_len);
-        while i < content_len && is_word(chars[i]) {
+        if i < content_len && !is_word(chars[i]) && !chars[i].is_whitespace() {
+            // Sitting on punctuation: skip that run, then the blanks.
+            while i < content_len && !is_word(chars[i]) && !chars[i].is_whitespace() {
+                i += 1;
+            }
+        } else {
+            while i < content_len && is_word(chars[i]) {
+                i += 1;
+            }
+        }
+        while i < content_len && chars[i].is_whitespace() {
             i += 1;
         }
-        while i < content_len && !is_word(chars[i]) {
-            i += 1;
+        if i < content_len {
+            Some(i)
+        } else {
+            None
         }
-        i.min(content_len.saturating_sub(1))
+    }
+
+    pub(crate) fn word_forward_col(&self, line: usize, col: usize, big: bool) -> usize {
+        match self.word_forward_target(line, col, big) {
+            Some(target) => target,
+            None => self.engine.buffer.line_max_col(line),
+        }
     }
 
     /// First column of the word before the one under the cursor.
     ///
     /// Used by `b`, `db`, `cb`: the cursor must land on the start of the
     /// preceding word, skipping the blanks in between.
-    pub(crate) fn word_back_start(&self, line: usize, col: usize) -> usize {
+    pub(crate) fn word_back_start(&self, line: usize, col: usize, big: bool) -> usize {
         let chars = self.engine.buffer.line_chars(line);
         if col == 0 || chars.is_empty() {
             return 0;
         }
-        let is_word = |c: char| !c.is_whitespace();
+        let is_word = |c: char| {
+            if big {
+                !c.is_whitespace()
+            } else {
+                c.is_alphanumeric() || c == '_'
+            }
+        };
 
         let mut i = col.saturating_sub(1).min(chars.len() - 1);
         while i > 0 && !is_word(chars[i]) {
@@ -194,27 +224,51 @@ impl Editor {
     }
 
     pub(crate) fn move_word_forward(&mut self) {
+        self.move_word_forward_impl(false);
+    }
+
+    /// Vim's `W`: whitespace-delimited WORDs.
+    pub(crate) fn move_word_forward_big(&mut self) {
+        self.move_word_forward_impl(true);
+    }
+
+    fn move_word_forward_impl(&mut self, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        self.engine.state.cursor.col = self.word_forward_col(line, col);
+        self.engine.state.cursor.col = self.word_forward_col(line, col, big);
         self.needs_render = true;
     }
 
     pub(crate) fn move_word_backward(&mut self) {
+        self.move_word_backward_impl(false);
+    }
+
+    /// Vim's `B`.
+    pub(crate) fn move_word_backward_big(&mut self) {
+        self.move_word_backward_impl(true);
+    }
+
+    fn move_word_backward_impl(&mut self, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        self.engine.state.cursor.col = self.word_back_start(line, col);
+        self.engine.state.cursor.col = self.word_back_start(line, col, big);
         self.needs_render = true;
     }
 
     /// Last column of the word the cursor is on (or of the next one).
-    pub(crate) fn word_end_col(&self, line: usize, col: usize) -> usize {
+    pub(crate) fn word_end_col(&self, line: usize, col: usize, big: bool) -> usize {
         let chars = self.engine.buffer.line_chars(line);
         let content_len = self.engine.buffer.line_content_len(line);
         if content_len == 0 {
             return 0;
         }
-        let is_word = |c: char| !c.is_whitespace();
+        let is_word = |c: char| {
+            if big {
+                !c.is_whitespace()
+            } else {
+                c.is_alphanumeric() || c == '_'
+            }
+        };
 
         let mut i = col.min(content_len.saturating_sub(1));
         while i < content_len && !is_word(chars[i]) {
@@ -227,9 +281,18 @@ impl Editor {
     }
 
     pub(crate) fn move_word_end(&mut self) {
+        self.move_word_end_impl(false);
+    }
+
+    /// Vim's `E`.
+    pub(crate) fn move_word_end_big(&mut self) {
+        self.move_word_end_impl(true);
+    }
+
+    fn move_word_end_impl(&mut self, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        self.engine.state.cursor.col = self.word_end_col(line, col);
+        self.engine.state.cursor.col = self.word_end_col(line, col, big);
         self.needs_render = true;
     }
 

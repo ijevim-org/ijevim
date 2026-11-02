@@ -306,30 +306,20 @@ impl TextBuffer {
         self.dirty = true;
     }
 
+    /// Word (keyword) run at `col`: alphanumerics and `_`, Vim's default
+    /// `iskeyword`. Punctuation is its own run, so `diw` on `foo.bar` deletes
+    /// `foo` rather than the whole token.
     pub fn get_word_at(&self, line: usize, col: usize) -> (String, usize, usize) {
-        if line < 1 || line > self.line_count() {
-            return (String::new(), 0, 0);
-        }
-        let chars: Vec<char> = self.line_chars(line);
-
-        if col >= chars.len() {
-            return (String::new(), col, col);
-        }
-
-        let mut start = col;
-        while start > 0 && !chars[start - 1].is_whitespace() {
-            start -= 1;
-        }
-
-        let mut end = col;
-        while end < chars.len() && !chars[end].is_whitespace() {
-            end += 1;
-        }
-
-        let word: String = chars[start..end].iter().collect();
-        (word, start, end)
+        self.word_range_with(line, col, false)
     }
 
+    /// WORD run at `col`: everything up to the next blank (Vim's `W`/`B`).
+    pub fn get_word_at_upper(&self, line: usize, col: usize) -> (String, usize, usize) {
+        self.word_range_with(line, col, true)
+    }
+
+    /// Word (keyword) range at the given position.
+    /// Returns (word_text, start_col, end_col).
     pub fn get_word_range(&self, line: usize, col: usize) -> (String, usize, usize) {
         self.get_word_at(line, col)
     }
@@ -338,7 +328,46 @@ impl TextBuffer {
     /// A WORD is a sequence of non-whitespace characters (Vim's `W`/`B`).
     /// Returns (word_text, start_col, end_col).
     pub fn get_word_range_upper(&self, line: usize, col: usize) -> (String, usize, usize) {
-        self.get_word_at(line, col)
+        self.get_word_at_upper(line, col)
+    }
+
+    /// Shared implementation for word and WORD ranges.
+    fn word_range_with(&self, line: usize, col: usize, big: bool) -> (String, usize, usize) {
+        if line < 1 || line > self.line_count() {
+            return (String::new(), 0, 0);
+        }
+        let chars: Vec<char> = self.line_chars(line);
+        let content_len = self.line_content_len(line);
+        if col >= content_len {
+            return (String::new(), col, col);
+        }
+
+        // 0 = blank, 1 = word, 2 = punctuation. WORDs collapse 1 and 2.
+        let class = |c: char| -> u8 {
+            if c.is_whitespace() {
+                0
+            } else if big || c.is_alphanumeric() || c == '_' {
+                1
+            } else {
+                2
+            }
+        };
+
+        let target = class(chars[col]);
+        let mut start = col;
+        while start > 0 && class(chars[start - 1]) == target {
+            start -= 1;
+        }
+        let mut end = col;
+        while end < content_len && class(chars[end]) == target {
+            end += 1;
+        }
+        if end == start {
+            end = (start + 1).min(content_len);
+        }
+
+        let word: String = chars[start..end].iter().collect();
+        (word, start, end)
     }
 
     pub fn get_line_range(&self, start_line: usize, end_line: usize) -> String {

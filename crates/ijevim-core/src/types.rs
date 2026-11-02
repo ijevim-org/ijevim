@@ -811,12 +811,20 @@ mod tests {
         assert_eq!(layout.windows[0].row_end, 29);
     }
 
+    fn bounds(layout: &WindowLayout) -> Vec<(usize, usize, usize, usize)> {
+        layout
+            .windows
+            .iter()
+            .map(|w| (w.row_start, w.row_end, w.col_start, w.col_end))
+            .collect()
+    }
+
     #[test]
     fn resize_is_a_noop_when_size_is_unchanged() {
         let mut layout = windows_of_split(24, 80);
-        let before = layout.windows.clone();
+        let before = bounds(&layout);
         layout.resize(24, 80);
-        assert_eq!(layout.windows, before);
+        assert_eq!(bounds(&layout), before);
     }
 
     #[test]
@@ -830,7 +838,10 @@ mod tests {
 
         assert_eq!(layout.windows.len(), 3);
         for w in &layout.windows {
-            assert!(w.row_end > w.row_start, "no window may collapse to zero rows");
+            assert!(
+                w.row_end > w.row_start,
+                "no window may collapse to zero rows"
+            );
         }
     }
 }

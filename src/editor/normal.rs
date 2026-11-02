@@ -494,6 +494,27 @@ impl Editor {
                     }
                     self.needs_render = true;
                 }
+                KeyCode::Char('W') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.move_word_forward_big();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char('B') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.move_word_backward_big();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char('E') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.move_word_end_big();
+                    }
+                    self.needs_render = true;
+                }
                 KeyCode::Char('b') => {
                     let count = self.take_count();
                     for _ in 0..count {
@@ -603,7 +624,10 @@ impl Editor {
                     self.yank_lines_range(register, line, line + count.max(1) - 1);
                 }
                 KeyCode::Char('w') => {
-                    self.yank_word(register);
+                    self.yank_word(register, count, false);
+                }
+                KeyCode::Char('W') => {
+                    self.yank_word(register, count, true);
                 }
                 KeyCode::Char('$') => {
                     let line = self.engine.state.cursor.line;
@@ -626,7 +650,7 @@ impl Editor {
                 KeyCode::Char('b') => {
                     let line = self.engine.state.cursor.line;
                     let col = self.engine.state.cursor.col;
-                    let start = self.word_back_start(line, col);
+                    let start = self.word_back_start(line, col, false);
                     self.yank_cols(register, start, col);
                 }
                 KeyCode::Char('j') => {
@@ -670,7 +694,10 @@ impl Editor {
                     self.push_undo_group(edits);
                 }
                 KeyCode::Char('w') => {
-                    self.delete_word(register);
+                    self.delete_word(register, count, false);
+                }
+                KeyCode::Char('W') => {
+                    self.delete_word(register, count, true);
                 }
                 KeyCode::Char('$') => {
                     let line = self.engine.state.cursor.line;
@@ -698,7 +725,7 @@ impl Editor {
                 KeyCode::Char('b') => {
                     let line = self.engine.state.cursor.line;
                     let col = self.engine.state.cursor.col;
-                    let start = self.word_back_start(line, col);
+                    let start = self.word_back_start(line, col, false);
                     self.delete_cols(register, start, col);
                 }
                 KeyCode::Char('j') => {
@@ -753,38 +780,19 @@ impl Editor {
                     self.on_buffer_modified();
                 }
                 KeyCode::Char('w') => {
-                    let (word, start, _) = self.engine.buffer.get_word_range(
-                        self.engine.state.cursor.line,
-                        self.engine.state.cursor.col,
-                    );
-                    if !word.is_empty() {
-                        let word_chars = word.chars().count();
-                        let char_start = self
-                            .engine
-                            .buffer
-                            .line_to_char(self.engine.state.cursor.line - 1)
-                            + start;
-                        let char_end = char_start + word_chars;
-                        let content = self.engine.buffer.get_char_range(
-                            self.engine.state.cursor.line,
-                            start,
-                            self.engine.state.cursor.line,
-                            start + word_chars,
-                        );
-                        self.engine.register.set(register, &content);
-                        self.engine.buffer.remove_range(char_start, char_end);
-                        let prev_mode = self.engine.state.mode;
-                        self.engine.state.mode = Mode::Insert;
-                        self.engine.plugin_manager.emit(PluginEvent::ModeChange {
-                            from: prev_mode,
-                            to: Mode::Insert,
-                        });
+                    let line = self.engine.state.cursor.line;
+                    let (word, start, end) = self
+                        .engine
+                        .buffer
+                        .get_word_range(line, self.engine.state.cursor.col);
+                    if let Some(edit) = self.delete_cols_edit(register, start, end) {
+                        self.engine.undo_manager.push(edit);
                         self.engine.dot_last_action = Some(DotAction::Change {
-                            text: content,
-                            line: self.engine.state.cursor.line,
+                            text: word,
+                            line,
                             col: start,
                         });
-                        self.on_buffer_modified();
+                        self.enter_insert_after_change();
                     }
                 }
                 KeyCode::Char('$') => {
@@ -817,8 +825,15 @@ impl Editor {
                 KeyCode::Char('b') => {
                     let line = self.engine.state.cursor.line;
                     let col = self.engine.state.cursor.col;
-                    let start = self.word_back_start(line, col);
+                    let start = self.word_back_start(line, col, false);
                     self.delete_cols(register, start, col);
+                    self.enter_insert_after_change();
+                }
+                KeyCode::Char('W') => {
+                    let line = self.engine.state.cursor.line;
+                    let col = self.engine.state.cursor.col;
+                    let (_, start, end) = self.engine.buffer.get_word_range_upper(line, col);
+                    self.delete_cols(register, start, end);
                     self.enter_insert_after_change();
                 }
                 KeyCode::Char('i') => {
@@ -994,11 +1009,21 @@ impl Editor {
 
     /// Delete the character range `[start, end)` on the cursor line.
     fn delete_cols(&mut self, register: char, start: usize, end: usize) {
+        if let Some(edit) = self.delete_cols_edit(register, start, end) {
+            self.engine.undo_manager.push(edit);
+        }
+    }
+
+    /// Delete the range and return its undo entry without pushing it.
+    ///
+    /// Multi-step operators (`3dw`, `dj`, ...) collect the entries and push
+    /// them as one group, so the single `u` a user expects restores them all.
+    fn delete_cols_edit(&mut self, register: char, start: usize, end: usize) -> Option<Edit> {
         let line = self.engine.state.cursor.line;
         let (start, end) = (start.min(end), start.max(end));
         let end = end.min(self.line_content_len(line));
         if start >= end {
-            return;
+            return None;
         }
         let content = self.engine.buffer.get_char_range(line, start, line, end);
         let char_start = self.engine.buffer.line_to_char(line.saturating_sub(1)) + start;
@@ -1007,7 +1032,13 @@ impl Editor {
             .buffer
             .remove_range(char_start, char_start + (end - start));
         self.engine.register.set(register, &content);
-        self.engine.undo_manager.push(Edit {
+        self.engine.state.cursor.col = start.min(
+            self.engine
+                .buffer
+                .line_max_col(self.engine.state.cursor.line),
+        );
+        self.on_buffer_modified();
+        Some(Edit {
             edit_type: EditType::Delete {
                 line,
                 col: start,
@@ -1016,9 +1047,7 @@ impl Editor {
             cursor_before: self.engine.state.cursor,
             cursor_after: self.engine.state.cursor,
             modification_count: mod_count,
-        });
-        self.engine.state.cursor.col = start;
-        self.on_buffer_modified();
+        })
     }
 
     /// Yank the character range `[start, end)` on the cursor line.
@@ -1086,13 +1115,23 @@ impl Editor {
             .unwrap_or(0)
     }
 
-    fn yank_word(&mut self, register: char) {
-        let (word, _, _) = self
-            .engine
-            .buffer
-            .get_word_range(self.engine.state.cursor.line, self.engine.state.cursor.col);
-        self.engine.register.set(register, &word);
-        self.needs_render = true;
+    /// `yw` / `yW`: yank the same span `dw` would delete.
+    fn yank_word(&mut self, register: char, count: usize, big: bool) {
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let content_len = self.line_content_len(line);
+
+        let mut target = col;
+        for _ in 0..count.max(1) {
+            match self.word_forward_target(line, target, big) {
+                Some(next) => target = next,
+                None => {
+                    target = content_len;
+                    break;
+                }
+            }
+        }
+        self.yank_cols(register, col, target);
     }
 
     fn yank_word_end(&mut self, register: char) {
@@ -1171,22 +1210,27 @@ impl Editor {
         });
     }
 
-    fn delete_word(&mut self, register: char) {
-        let (word, start, _) = self
-            .engine
-            .buffer
-            .get_word_range(self.engine.state.cursor.line, self.engine.state.cursor.col);
-        if !word.is_empty() {
-            let char_start = self
-                .engine
-                .buffer
-                .line_to_char(self.engine.state.cursor.line - 1)
-                + start;
-            let char_end = char_start + word.chars().count();
-            self.engine.buffer.remove_range(char_start, char_end);
-            self.engine.register.set(register, &word);
+    /// `dw` / `dW`: delete to the start of the next word, like Vim.
+    ///
+    /// The trailing blanks belong to the motion; without them the next word
+    /// would stay glued to whatever follows. When no further word exists the
+    /// delete runs to the end of the line.
+    fn delete_word(&mut self, register: char, count: usize, big: bool) {
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let content_len = self.line_content_len(line);
+
+        let mut target = col;
+        for _ in 0..count.max(1) {
+            match self.word_forward_target(line, target, big) {
+                Some(next) => target = next,
+                None => {
+                    target = content_len;
+                    break;
+                }
+            }
         }
-        self.needs_render = true;
+        self.delete_cols(register, col, target);
     }
 
     async fn paste(&mut self, before: bool) {

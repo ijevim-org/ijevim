@@ -1785,3 +1785,136 @@ async fn line_end_on_tabbed_line_stops_before_newline() {
     let (_, _, col, _) = ed.snapshot_for_test();
     assert_eq!(col, 2, "the tab counts as one character");
 }
+
+// ── Window splits survive a resize (B15) ────────────────────────────
+
+fn window_bounds(ed: &Editor) -> Vec<(usize, usize, usize, usize)> {
+    ed.engine
+        .window_layout
+        .windows
+        .iter()
+        .map(|w| (w.row_start, w.row_end, w.col_start, w.col_end))
+        .collect()
+}
+
+#[tokio::test]
+async fn split_survives_resize() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "split").await;
+    assert_eq!(
+        ed.engine.window_layout.windows.len(),
+        2,
+        ":split must create a second window"
+    );
+
+    ed.engine.update_window_layout(40, 100);
+
+    assert_eq!(
+        ed.engine.window_layout.windows.len(),
+        2,
+        "a resize must not close the split"
+    );
+    for (row_start, row_end, col_start, col_end) in window_bounds(&ed) {
+        assert!(row_end > row_start, "window collapsed vertically");
+        assert!(col_end > col_start, "window collapsed horizontally");
+    }
+}
+
+#[tokio::test]
+async fn vsplit_survives_resize() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "vsplit").await;
+    assert_eq!(ed.engine.window_layout.windows.len(), 2);
+
+    ed.engine.update_window_layout(40, 100);
+
+    let bounds = window_bounds(&ed);
+    assert_eq!(bounds.len(), 2, "a resize must not close the vsplit");
+    assert_eq!(bounds[1].2, bounds[0].3, "windows must stay contiguous");
+    assert_eq!(
+        bounds[1].3, 100,
+        "the last window must reach the right edge"
+    );
+}
+
+// ── WORD vs word (B58) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn word_motion_stops_at_punctuation() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    press_key(&mut ed, KeyCode::Char('w')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 3, "w must stop at the punctuation");
+}
+
+#[tokio::test]
+async fn word_motion_big_skips_punctuation() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    press_key(&mut ed, KeyCode::Char('W')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 8, "W must jump over the whole non-blank run");
+}
+
+#[tokio::test]
+async fn word_backward_big_skips_punctuation() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "WB").await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 0);
+}
+
+#[tokio::test]
+async fn word_end_big_stops_at_word_end() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "E").await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 6, "E must stop on the last char of the WORD");
+}
+
+#[tokio::test]
+async fn inner_word_text_object_stops_at_punctuation() {
+    let mut ed = test_vim_editor("foo.bar\n");
+    type_keys(&mut ed, "diw").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, ".bar\n");
+}
+
+#[tokio::test]
+async fn inner_word_big_deletes_the_whole_word() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "diW").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, " baz\n");
+}
+
+#[tokio::test]
+async fn delete_word_operator_is_undoable() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "dw").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "world\n", "dw must take the trailing blank with it");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n");
+}
+
+#[tokio::test]
+async fn delete_word_with_count_is_one_undo_step() {
+    let mut ed = test_vim_editor("one two three\n");
+    type_keys(&mut ed, "2dw").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "three\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "one two three\n");
+}
+
+#[tokio::test]
+async fn delete_word_big_operator() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "dW").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "baz\n");
+}
