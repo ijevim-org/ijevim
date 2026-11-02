@@ -7,7 +7,6 @@ use ijevim_core::types::{EditorState, MessageLevel, Mode, VisualType, Window, Wi
 use ijevim_highlight::Style;
 use std::io;
 use unicode_width::UnicodeWidthChar;
-use unicode_width::UnicodeWidthStr;
 
 // ── Named colour constants ─────────────────────────────────────────────
 const LINE_NUMBER_FG: Color = Color::AnsiValue(240);
@@ -45,8 +44,9 @@ struct VisualLine {
     buffer_line: usize,
     /// Styled characters to display on this screen row.
     styled_chars: Vec<(char, CellStyle)>,
-    /// Column offset within the buffer line where this segment starts.
-    segment_start_col: usize,
+    /// Buffer-line column (in characters) of each entry in `styled_chars`.
+    /// Differs from the index when a tab expands into several spaces.
+    source_cols: Vec<usize>,
 }
 
 pub struct Renderer {
@@ -194,7 +194,7 @@ impl Renderer {
         let inactive_buffers = ctx.inactive_buffers;
         let state = ctx.state;
         let highlights = ctx.highlights;
-        let _is_focused = ctx.is_focused;
+        let is_focused = ctx.is_focused;
         let total_cols = ctx.total_cols;
 
         let window_rows = window.row_end.saturating_sub(window.row_start);
@@ -253,7 +253,7 @@ impl Renderer {
                 visual_lines.push(VisualLine {
                     buffer_line: buf_line,
                     styled_chars: segment.chars.clone(),
-                    segment_start_col: segment.start_col,
+                    source_cols: segment.source_cols.clone(),
                 });
                 screen_rows_used += 1;
             }
@@ -312,13 +312,14 @@ impl Renderer {
                     if let Some((sel_start, sel_end)) =
                         self.selection_line_range(state, buffer, vline.buffer_line)
                     {
-                        let buf_col = vline.segment_start_col + col;
+                        let buf_col = vline.source_cols.get(col).copied().unwrap_or(col);
                         if buf_col >= sel_start && buf_col < sel_end {
                             cell_style.bg = VISUAL_SELECTION_BG;
                         }
                     }
-                    // Highlight current line in focused window
-                    if vline.buffer_line == self.get_focused_cursor_line(window)
+                    // Highlight the current line, but only in the focused window.
+                    if is_focused
+                        && vline.buffer_line == window.cursor.line
                         && cell_style.bg != VISUAL_SELECTION_BG
                     {
                         cell_style.bg = CURRENT_LINE_BG;
@@ -333,11 +334,8 @@ impl Renderer {
             }
 
             // Fill remainder with spaces — use display-width aware fill position
-            let content_display_width: usize = vline
-                .styled_chars
-                .iter()
-                .map(|(ch, _)| char_display_width(*ch))
-                .sum();
+            let content_display_width =
+                cells_display_width(&vline.styled_chars, state.tabstop);
             let last_col =
                 window.col_start + line_number_prefix + content_display_width.min(content_width);
             for col in last_col..window.col_end.min(total_cols) {
@@ -371,11 +369,6 @@ impl Renderer {
                     .set_cell(target_row, col, ' ', CellStyle::default());
             }
         }
-    }
-
-    /// Get the cursor line for the focused window (for line highlighting).
-    fn get_focused_cursor_line(&self, window: &Window) -> usize {
-        window.cursor.line
     }
 
     /// Return the column range `(start, end)` of visual selection on `buf_line`,
@@ -675,7 +668,7 @@ impl Renderer {
 
         if cursor_line >= start_line && cursor_line <= buffer.line_count() {
             let line_text = buffer.get_line(cursor_line);
-            let line_width = unicode_width_str(&line_text);
+            let line_width = line_display_width(&line_text, tabstop);
             let num_segments = line_width.div_ceil(content_width).max(1);
 
             // Use display-width-aware segment calculation
@@ -709,7 +702,11 @@ impl Renderer {
 
         // Get the character under the cursor to render it inverted
         let line_chars: Vec<char> = buffer.line_chars(cursor_line);
-        let cursor_ch = line_chars.get(cursor_col).copied().unwrap_or(' ');
+        let cursor_ch = match line_chars.get(cursor_col).copied().unwrap_or(' ') {
+            '\t' => ' ',
+            '\n' => ' ',
+            ch => ch,
+        };
 
         self.screen.set_cell(
             row,
@@ -732,29 +729,49 @@ impl Default for Renderer {
 
 // ── Free helper functions ──
 
-/// Display width of a character using unicode-width.
-/// Treats tabs as having width 1 (actual tab rendering is handled by the
-/// terminal when we output the tab character).
-fn char_display_width(ch: char) -> usize {
-    if ch == '\n' {
-        return 0;
+/// Display width of `ch` when rendered at `col` within its (wrapped) row.
+///
+/// Tabs advance to the next multiple of `tabstop`; newlines take no space.
+/// Every width computation in this module must go through this function, or
+/// tab-containing lines render and wrap inconsistently.
+fn char_width_at(ch: char, tabstop: usize, col: usize) -> usize {
+    match ch {
+        '\n' => 0,
+        '\t' => {
+            let ts = tabstop.max(1);
+            ts - (col % ts)
+        }
+        _ => UnicodeWidthChar::width(ch).unwrap_or(0),
     }
-    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
-/// Display width of a string.
-fn unicode_width_str(s: &str) -> usize {
-    // Exclude trailing newline from width calculation
-    let trimmed = s.strip_suffix('\n').unwrap_or(s);
-    UnicodeWidthStr::width(trimmed)
+/// Display width of a whole line (trailing newline excluded).
+fn line_display_width(text: &str, tabstop: usize) -> usize {
+    let mut width = 0usize;
+    for ch in text.chars() {
+        if ch == '\n' {
+            continue;
+        }
+        width += char_width_at(ch, tabstop, width);
+    }
+    width
+}
+
+/// Display width of already-expanded styled cells (no tabs remain).
+fn cells_display_width(cells: &[(char, CellStyle)], tabstop: usize) -> usize {
+    let mut width = 0usize;
+    for (ch, _) in cells {
+        width += char_width_at(*ch, tabstop, width);
+    }
+    width
 }
 
 /// Number of wrapped rows a line would occupy.
-pub fn wrapped_rows(text: &str, max_width: usize, wrap: bool, _tabstop: usize) -> usize {
+pub fn wrapped_rows(text: &str, max_width: usize, wrap: bool, tabstop: usize) -> usize {
     if !wrap {
         return 1;
     }
-    let width = unicode_width_str(text);
+    let width = line_display_width(text, tabstop);
     if width == 0 {
         return 1;
     }
@@ -764,69 +781,62 @@ pub fn wrapped_rows(text: &str, max_width: usize, wrap: bool, _tabstop: usize) -
 /// A wrapped segment: the characters + the starting column offset in the buffer line.
 pub(crate) struct WrappedSegment {
     pub(crate) chars: Vec<(char, CellStyle)>,
-    pub(crate) start_col: usize,
+    /// Buffer-line character index of each entry in `chars`.
+    pub(crate) source_cols: Vec<usize>,
 }
 
 /// Split styled chars into screen rows, tracking display width and segment start.
+///
+/// Tabs are expanded into spaces here; a raw `\t` must never reach
+/// [`crate::screen::ScreenBuffer`], because the terminal would expand it with
+/// its own tab stops and shift every following column.
 pub(crate) fn wrap_styled(
     styled_chars: &[(char, CellStyle)],
     max_width: usize,
     wrap: bool,
-    _tabstop: usize,
+    tabstop: usize,
 ) -> Vec<WrappedSegment> {
-    if !wrap || styled_chars.is_empty() {
-        return vec![WrappedSegment {
-            chars: styled_chars.to_vec(),
-            start_col: 0,
-        }];
-    }
-
     let mut rows: Vec<WrappedSegment> = Vec::new();
-    let mut current = Vec::new();
+    let mut current: Vec<(char, CellStyle)> = Vec::new();
+    let mut current_src: Vec<usize> = Vec::new();
     let mut current_width = 0usize;
-    let mut col_offset = 0usize;
-    let mut segment_start = 0usize;
+    let mut source_col = 0usize;
 
     for (ch, style) in styled_chars {
-        let ch_width = char_display_width(*ch);
-        if ch_width == 0 {
-            // Zero-width characters (combining, control): still include in output
-            // but don't advance display width for wrapping purposes.
-            current.push((*ch, *style));
-            col_offset += 1; // Advance char index even if display width is 0
-            continue;
-        }
-        if current_width + ch_width > max_width && !current.is_empty() {
+        let mut ch_width = char_width_at(*ch, tabstop, current_width);
+        if wrap && ch_width > 0 && current_width + ch_width > max_width && !current.is_empty() {
             rows.push(WrappedSegment {
-                chars: current,
-                start_col: segment_start,
+                chars: std::mem::take(&mut current),
+                source_cols: std::mem::take(&mut current_src),
             });
-            current = Vec::new();
             current_width = 0;
-            segment_start = col_offset;
+            ch_width = char_width_at(*ch, tabstop, current_width);
         }
-        current.push((*ch, *style));
+
+        if *ch == '\t' {
+            for _ in 0..ch_width {
+                current.push((' ', *style));
+                current_src.push(source_col);
+            }
+        } else {
+            current.push((*ch, *style));
+            current_src.push(source_col);
+        }
         current_width += ch_width;
-        col_offset += 1; // Track char index offset (not display width)
+        source_col += 1;
     }
 
-    if !current.is_empty() {
+    if !current.is_empty() || rows.is_empty() {
         rows.push(WrappedSegment {
             chars: current,
-            start_col: segment_start,
-        });
-    }
-    if rows.is_empty() {
-        rows.push(WrappedSegment {
-            chars: Vec::new(),
-            start_col: 0,
+            source_cols: current_src,
         });
     }
     rows
 }
 
 /// Find which display-width segment the given column falls into.
-fn find_segment_for_col(line: &str, col: usize, content_width: usize, _tabstop: usize) -> usize {
+fn find_segment_for_col(line: &str, col: usize, content_width: usize, tabstop: usize) -> usize {
     if content_width == 0 {
         return 0;
     }
@@ -836,10 +846,11 @@ fn find_segment_for_col(line: &str, col: usize, content_width: usize, _tabstop: 
         if i >= col {
             break;
         }
-        let cw = char_display_width(ch);
+        let mut cw = char_width_at(ch, tabstop, w);
         if w + cw > content_width {
             seg_idx += 1;
             w = 0;
+            cw = char_width_at(ch, tabstop, w);
         }
         w += cw;
     }
@@ -851,7 +862,7 @@ fn find_segment_start_col(
     line: &str,
     seg_idx: usize,
     content_width: usize,
-    _tabstop: usize,
+    tabstop: usize,
 ) -> usize {
     let mut seg = 0usize;
     let mut w = 0usize;
@@ -859,10 +870,11 @@ fn find_segment_start_col(
         if seg == seg_idx {
             return i;
         }
-        let cw = char_display_width(ch);
+        let mut cw = char_width_at(ch, tabstop, w);
         if w + cw > content_width {
             seg += 1;
             w = 0;
+            cw = char_width_at(ch, tabstop, w);
         }
         w += cw;
     }
@@ -874,14 +886,76 @@ fn display_col_within_segment(
     line: &str,
     cursor_col: usize,
     segment_start_col: usize,
-    _tabstop: usize,
+    tabstop: usize,
 ) -> usize {
     let mut dcol = 0usize;
     for (i, ch) in line.chars().enumerate() {
-        if i >= cursor_col || i < segment_start_col {
+        if i >= cursor_col {
+            break;
+        }
+        if i < segment_start_col {
             continue;
         }
-        dcol += char_display_width(ch);
+        dcol += char_width_at(ch, tabstop, dcol);
     }
     dcol
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn styled(text: &str) -> Vec<(char, CellStyle)> {
+        text.chars().map(|c| (c, CellStyle::default())).collect()
+    }
+
+    /// A tab must expand into spaces: emitting `\t` into the screen buffer
+    /// makes the terminal apply its own tab stops and shifts every column.
+    #[test]
+    fn tab_expands_to_tabstop_width() {
+        let rows = wrap_styled(&styled("\tx"), 80, true, 4);
+        assert_eq!(rows.len(), 1);
+        let text: String = rows[0].chars.iter().map(|(c, _)| *c).collect();
+        assert_eq!(text, "    x");
+        assert_eq!(rows[0].source_cols, vec![0, 0, 0, 0, 1]);
+    }
+
+    /// `wrapped_rows` (used for scrolling) and `wrap_styled` (used for drawing)
+    /// must agree, otherwise the cursor lands on the wrong row.
+    #[test]
+    fn wrapped_rows_matches_wrap_styled() {
+        let cases = [
+            ("hello world", 4usize),
+            ("\tabc\tdef", 4),
+            ("あいうえお", 4),
+            ("aあbいc", 3),
+            ("", 5),
+        ];
+        for (text, width) in cases {
+            let expected = wrap_styled(&styled(text), width, true, 4).len();
+            assert_eq!(
+                wrapped_rows(text, width, true, 4),
+                expected,
+                "mismatch for {:?} at width {}",
+                text,
+                width
+            );
+        }
+    }
+
+    /// The cursor column must be measured the same way the cells are drawn.
+    #[test]
+    fn cursor_column_matches_tab_expansion() {
+        let line = "\tx";
+        // Cursor on 'x' is the 5th display cell (4 spaces + 'x').
+        assert_eq!(display_col_within_segment(line, 1, 0, 4), 4);
+        assert_eq!(find_segment_start_col(line, 0, 80, 4), 0);
+    }
+
+    /// Tabs must not wrap a line that fits once expanded.
+    #[test]
+    fn tab_does_not_force_wrap_when_it_fits() {
+        let rows = wrap_styled(&styled("\tab"), 6, true, 4);
+        assert_eq!(rows.len(), 1);
+    }
 }

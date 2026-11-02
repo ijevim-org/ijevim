@@ -1626,3 +1626,102 @@ async fn messages_command_does_not_grow_history() {
         ":messages must not append the whole log back into itself"
     );
 }
+
+#[tokio::test]
+async fn delete_to_end_of_line() {
+    let mut ed = test_vim_editor("hello world\nnext\n");
+    type_keys(&mut ed, "de").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, " world\nnext\n");
+
+    type_keys(&mut ed, "d$").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\nnext\n");
+}
+
+#[tokio::test]
+async fn delete_to_line_start() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "lll").await;
+    type_keys(&mut ed, "d0").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "lo world\n");
+}
+
+#[tokio::test]
+async fn delete_word_backward_motion() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "w").await;
+    type_keys(&mut ed, "db").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "world\n");
+}
+
+#[tokio::test]
+async fn delete_next_line_with_dj() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    type_keys(&mut ed, "dj").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "3\n");
+}
+
+#[tokio::test]
+async fn delete_previous_line_with_dk() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    press_key(&mut ed, KeyCode::Char('j')).await;
+    type_keys(&mut ed, "dk").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "3\n");
+}
+
+#[tokio::test]
+async fn delete_to_end_of_file_with_dg() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    press_key(&mut ed, KeyCode::Char('j')).await;
+    type_keys(&mut ed, "dG").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "1\n");
+}
+
+#[tokio::test]
+async fn yank_to_end_of_line_then_paste() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "y$").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n", "yank must not modify the buffer");
+
+    type_keys(&mut ed, "p").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert!(buf.contains("hello world"), "pasted content missing: {:?}", buf);
+}
+
+#[tokio::test]
+async fn change_to_end_of_line_enters_insert() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "wwc$").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello \n");
+}
+
+#[tokio::test]
+async fn operator_motions_are_undoable() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    type_keys(&mut ed, "dj").await;
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "1\n2\n3\n");
+}
+#[tokio::test]
+async fn dbg_change_dollar() {
+    let mut ed = test_vim_editor("hello world\n");
+    for c in "ww".chars() {
+        press_key(&mut ed, KeyCode::Char(c)).await;
+        let (buf, line, col, mode) = ed.snapshot_for_test();
+        eprintln!("after {:?}: buf={:?} line={} col={} mode={:?}", c, buf, line, col, mode);
+    }
+    press_key(&mut ed, KeyCode::Char('c')).await;
+    press_key(&mut ed, KeyCode::Char('$')).await;
+    let (buf, line, col, mode) = ed.snapshot_for_test();
+    eprintln!("after c$: buf={:?} line={} col={} mode={:?}", buf, line, col, mode);
+}
