@@ -1,9 +1,9 @@
-use crate::buffer::TextBuffer;
-use crate::highlight::Style;
+use ijevim_core::buffer::TextBuffer;
+use ijevim_highlight::Style;
 use crate::review::ReviewState;
 use crate::screen::{build_styled_chars, CellStyle, ScreenBuffer};
 use crate::terminal::Terminal;
-use crate::types::{EditorState, MessageLevel, Mode, VisualType, Window, WindowLayout};
+use ijevim_core::types::{EditorState, MessageLevel, Mode, VisualType, Window, WindowLayout};
 use crossterm::style::Color;
 use std::io;
 use unicode_width::UnicodeWidthChar;
@@ -29,9 +29,9 @@ struct WindowRenderContext<'a> {
     active_buffer: &'a TextBuffer,
     inactive_buffers: &'a [(
         TextBuffer,
-        crate::undo::UndoManager,
+        ijevim_core::undo::UndoManager,
         Option<std::path::PathBuf>,
-        crate::types::Position,
+        ijevim_core::types::Position,
     )],
     state: &'a EditorState,
     highlights: &'a [Vec<(Style, String)>],
@@ -78,9 +78,9 @@ impl Renderer {
         active_buffer: &TextBuffer,
         inactive_buffers: &[(
             TextBuffer,
-            crate::undo::UndoManager,
+            ijevim_core::undo::UndoManager,
             Option<std::path::PathBuf>,
-            crate::types::Position,
+            ijevim_core::types::Position,
         )],
         state: &EditorState,
         window_layout: &WindowLayout,

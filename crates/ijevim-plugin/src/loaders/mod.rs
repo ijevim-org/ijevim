@@ -9,7 +9,7 @@ pub mod nix;
 #[cfg(feature = "plugin-rust")]
 pub mod rust;
 
-use crate::plugin::{Plugin, PluginApi};
+use crate::{Plugin, PluginApi};
 use std::path::Path;
 use std::rc::Rc;
 

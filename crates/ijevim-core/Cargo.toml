@@ -1,0 +1,16 @@
+[package]
+name = "ijevim-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "UI-independent editor model for ijevim"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ropey.workspace = true
+tokio = { workspace = true, features = ["fs", "rt", "macros"] }
+thiserror.workspace = true
+toml.workspace = true
+regex.workspace = true

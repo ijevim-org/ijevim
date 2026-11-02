@@ -1,8 +1,8 @@
 #![cfg(feature = "plugin-rust")]
 
-use crate::plugin::api::{CommandFn, EventFn};
-use crate::plugin::{Plugin, PluginApi};
-use crate::types::PluginEvent;
+use crate::api::{CommandFn, EventFn};
+use crate::{Plugin, PluginApi};
+use ijevim_core::types::PluginEvent;
 use libloading::{Library, Symbol};
 use std::cell::RefCell;
 use std::collections::HashMap;

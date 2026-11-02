@@ -1,11 +1,52 @@
-[package]
-name = "ijevim"
+[workspace]
+members = [
+    "crates/ijevim-core",
+    "crates/ijevim-highlight",
+    "crates/ijevim-plugin",
+    "crates/ijevim-tui",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 description = "A minimal Vim-like TUI editor written in Rust"
 authors = ["NazoVim-org"]
 license = "MIT"
+repository = "https://github.com/NazoVim-org/ijevim"
+
+[workspace.dependencies]
+# Internal crates.
+ijevim-core = { path = "crates/ijevim-core" }
+ijevim-highlight = { path = "crates/ijevim-highlight" }
+ijevim-plugin = { path = "crates/ijevim-plugin" }
+ijevim-tui = { path = "crates/ijevim-tui" }
+
+# External crates shared across the workspace.
+crossterm = "0.29"
+ropey = "1.6"
+tokio = "1"
+thiserror = "2"
+toml = "0.8"
+regex = "1"
+unicode-width = "0.2"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "default-syntaxes", "default-themes"] }
+mlua = { version = "0.9", features = ["lua54", "vendored"] }
+rust_lisp = "0.18"
+quickjs-rusty = "0.11"
+libloading = "0.8"
+serde_json = "1"
+
+[package]
+name = "ijevim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "ijevim"
@@ -17,40 +58,33 @@ path = "src/main.rs"
 default = []
 
 # Syntax highlighting via syntect.
-syntax = ["dep:syntect"]
+syntax = ["ijevim-highlight/syntax", "ijevim-tui/syntax"]
 
 # Per-language plugin loaders. Each one pulls in a heavy runtime; enable only
 # the ones you actually need.
-plugin-lua = ["dep:mlua"]
-plugin-lisp = ["dep:rust_lisp"]
-plugin-js = ["dep:quickjs-rusty"]
-plugin-rust = ["dep:libloading"]
-plugin-nix = ["dep:serde_json"]
+plugin-lua = ["ijevim-plugin/plugin-lua"]
+plugin-lisp = ["ijevim-plugin/plugin-lisp"]
+plugin-js = ["ijevim-plugin/plugin-js"]
+plugin-rust = ["ijevim-plugin/plugin-rust"]
+plugin-nix = ["ijevim-plugin/plugin-nix"]
 
 # Convenience aggregates.
 plugins = ["plugin-lua", "plugin-lisp", "plugin-js", "plugin-rust", "plugin-nix"]
 full = ["syntax", "plugins"]
 
 [dependencies]
-# Always-on (core editor).
-crossterm = "0.29"
-ropey = "1.6"
-# Tokio: only the features we actually use. The editor runs on a single
-# thread with `#[tokio::main]` + `#[tokio::test]`, so `rt-multi-thread` is
-# unnecessary. `time`, `sync`, and `io-util` were audited and removed.
-tokio = { version = "1", features = ["rt", "macros", "fs"] }
-thiserror = "2"
-toml = "0.8"
-regex = "1"
-unicode-width = "0.2"
+# Workspace crates.
+ijevim-core.workspace = true
+ijevim-highlight.workspace = true
+ijevim-plugin.workspace = true
+ijevim-tui.workspace = true
 
-# Optional, feature-gated.
-syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "default-syntaxes", "default-themes"], optional = true }
-mlua = { version = "0.9", features = ["lua54", "vendored"], optional = true }
-rust_lisp = { version = "0.18", optional = true }
-quickjs-rusty = { version = "0.11", optional = true }
-libloading = { version = "0.8", optional = true }
-serde_json = { version = "1", optional = true }
+# Application-layer dependencies.
+crossterm.workspace = true
+# The editor runs on a single thread with `#[tokio::main]` + `#[tokio::test]`,
+# so only `rt` and `macros` are needed here; `fs` is pulled in by ijevim-core.
+tokio = { workspace = true, features = ["rt", "macros"] }
+regex.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

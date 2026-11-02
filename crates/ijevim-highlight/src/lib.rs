@@ -1,6 +1,6 @@
-//! Syntax highlighting.
+//! Syntax highlighting for ijevim.
 //!
-//! Enabled via the `syntax` feature. When the feature is off, the module
+//! Enabled via the `syntax` feature. When the feature is off, the crate
 //! exposes a stub [`Style`] type so downstream call-sites can keep using
 //! `Vec<Vec<(Style, String)>>` highlight segments without churn.
 

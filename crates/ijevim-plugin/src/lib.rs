@@ -3,7 +3,7 @@ pub mod loaders;
 
 pub use api::{Plugin, PluginApi};
 
-use crate::types::{IjevimError, PluginEvent};
+use ijevim_core::types::{IjevimError, PluginEvent};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;

@@ -1,4 +1,4 @@
-use crate::highlight::Style;
+use ijevim_highlight::Style;
 use crossterm::style::Color;
 use std::fmt::Write;
 

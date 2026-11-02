@@ -290,7 +290,7 @@ impl TextBuffer {
     /// Crate-private so unit tests in `editor/` can set up quit-confirmation
     /// scenarios without having to type a character first.
     #[cfg(test)]
-    pub(crate) fn force_dirty(&mut self, dirty: bool) {
+    pub fn force_dirty(&mut self, dirty: bool) {
         if dirty {
             // Increment past `saved_modification_count` to make `is_dirty()` true.
             self.modification_count = self.saved_modification_count + 1;

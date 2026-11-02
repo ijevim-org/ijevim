@@ -1,8 +1,8 @@
 #![cfg(feature = "plugin-lisp")]
 
-use crate::plugin::api::CommandFn;
-use crate::plugin::{Plugin, PluginApi};
-use crate::types::PluginEvent;
+use crate::api::CommandFn;
+use crate::{Plugin, PluginApi};
+use ijevim_core::types::PluginEvent;
 use rust_lisp::interpreter::eval_block;
 use rust_lisp::model::{Env, RuntimeError, Symbol, Value};
 use rust_lisp::parser::parse;
@@ -183,8 +183,8 @@ fn extract_string(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::loaders::Loader;
-    use crate::plugin::PluginApi;
+    use crate::loaders::Loader;
+    use crate::PluginApi;
 
     #[test]
     fn test_lisp_loader_basic() {

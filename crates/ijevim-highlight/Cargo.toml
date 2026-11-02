@@ -1,0 +1,16 @@
+[package]
+name = "ijevim-highlight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Syntax highlighting for ijevim"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+syntax = ["dep:syntect"]
+
+[dependencies]
+syntect = { workspace = true, optional = true }

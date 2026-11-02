@@ -15,7 +15,7 @@ use crate::review::state::{
 /// repository or if `git diff` fails. The caller should fall back to
 /// mock data when this returns `None`.
 pub fn try_get_review_state(args: &ReviewArgs) -> Option<ReviewState> {
-    let project_root = crate::git::find_root()?;
+    let project_root = ijevim_core::git::find_root()?;
     let diff_output = run_git_diff(args).ok()?;
     let files = parse_unified_diff(&diff_output);
 
@@ -54,7 +54,7 @@ fn run_git_diff(args: &ReviewArgs) -> Result<String, String> {
 fn diff_cmd(args: &[&str]) -> Result<String, String> {
     let mut all = vec!["diff"];
     all.extend_from_slice(args);
-    let output = crate::git::raw(&all).map_err(|e| format!("Failed to run git diff: {}", e))?;
+    let output = ijevim_core::git::raw(&all).map_err(|e| format!("Failed to run git diff: {}", e))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -69,7 +69,7 @@ fn diff_cmd(args: &[&str]) -> Result<String, String> {
 /// changes). Falls back to combining staged + unstaged separately when
 /// there is no HEAD commit yet (empty repository).
 fn run_working_tree_diff() -> Result<String, String> {
-    let head_result = crate::git::raw(&["diff", "HEAD", "--unified=3"])
+    let head_result = ijevim_core::git::raw(&["diff", "HEAD", "--unified=3"])
         .map_err(|e| format!("Failed to run git diff HEAD: {}", e))?;
 
     if head_result.status.success() {
@@ -77,9 +77,9 @@ fn run_working_tree_diff() -> Result<String, String> {
     }
 
     // HEAD doesn't exist yet (empty repo). Combine staged + unstaged.
-    let staged = crate::git::raw(&["diff", "--cached", "--unified=3"])
+    let staged = ijevim_core::git::raw(&["diff", "--cached", "--unified=3"])
         .map_err(|e| format!("Failed to run git diff --cached: {}", e))?;
-    let unstaged = crate::git::raw(&["diff", "--unified=3"])
+    let unstaged = ijevim_core::git::raw(&["diff", "--unified=3"])
         .map_err(|e| format!("Failed to run git diff: {}", e))?;
 
     if !staged.status.success() {
@@ -534,7 +534,7 @@ index abc..000
     #[test]
     fn run_git_diff_on_self() {
         // This test requires being in a git repo
-        if crate::git::find_root().is_none() {
+        if ijevim_core::git::find_root().is_none() {
             eprintln!("Skipping git diff test (not in a repo)");
             return;
         }
@@ -688,7 +688,7 @@ diff --git a/src/main.rs b/src/main.rs
     #[test]
     fn stage_hunk_integration() {
         // Only run in a git repo (this project)
-        let _root = match crate::git::find_root() {
+        let _root = match ijevim_core::git::find_root() {
             Some(r) => r,
             None => {
                 eprintln!("Skipping stage_hunk test (not in a repo)");
@@ -803,7 +803,7 @@ diff --git a/src/main.rs b/src/main.rs
     #[test]
     fn unstage_hunk_integration() {
         // Only run in a git repo
-        if crate::git::find_root().is_none() {
+        if ijevim_core::git::find_root().is_none() {
             eprintln!("Skipping unstage_hunk test (not in a repo)");
             return;
         }

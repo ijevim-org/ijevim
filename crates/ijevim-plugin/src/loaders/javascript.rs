@@ -1,7 +1,7 @@
 #![cfg(feature = "plugin-js")]
 
-use crate::plugin::{Plugin, PluginApi};
-use crate::types::PluginEvent;
+use crate::{Plugin, PluginApi};
+use ijevim_core::types::PluginEvent;
 use quickjs_rusty::Context;
 use std::cell::RefCell;
 use std::path::Path;
@@ -186,8 +186,8 @@ var ijevim = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::loaders::Loader;
-    use crate::plugin::PluginApi;
+    use crate::loaders::Loader;
+    use crate::PluginApi;
 
     #[test]
     fn test_js_loader_basic() {

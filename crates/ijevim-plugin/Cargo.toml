@@ -1,0 +1,26 @@
+[package]
+name = "ijevim-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Multi-language plugin loaders for ijevim"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+plugin-lua = ["dep:mlua"]
+plugin-lisp = ["dep:rust_lisp"]
+plugin-js = ["dep:quickjs-rusty"]
+plugin-rust = ["dep:libloading"]
+plugin-nix = ["dep:serde_json"]
+plugins = ["plugin-lua", "plugin-lisp", "plugin-js", "plugin-rust", "plugin-nix"]
+
+[dependencies]
+ijevim-core.workspace = true
+mlua = { workspace = true, optional = true }
+rust_lisp = { workspace = true, optional = true }
+quickjs-rusty = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }

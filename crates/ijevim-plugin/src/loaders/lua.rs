@@ -1,7 +1,7 @@
 #![cfg(feature = "plugin-lua")]
 
-use crate::plugin::{Plugin, PluginApi};
-use crate::types::PluginEvent;
+use crate::{Plugin, PluginApi};
+use ijevim_core::types::PluginEvent;
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 use std::path::Path;
 use std::rc::Rc;

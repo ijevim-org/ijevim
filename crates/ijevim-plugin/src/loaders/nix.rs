@@ -1,7 +1,7 @@
 #![cfg(feature = "plugin-nix")]
 
-use crate::plugin::{Plugin, PluginApi};
-use crate::types::PluginEvent;
+use crate::{Plugin, PluginApi};
+use ijevim_core::types::PluginEvent;
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
@@ -137,8 +137,8 @@ impl super::Loader for NixLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::loaders::Loader;
-    use crate::plugin::PluginApi;
+    use crate::loaders::Loader;
+    use crate::PluginApi;
 
     #[test]
     fn test_nix_loader_basic() {

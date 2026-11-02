@@ -545,18 +545,52 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "crossterm",
- "libloading",
- "mlua",
- "quickjs-rusty",
+ "ijevim-core",
+ "ijevim-highlight",
+ "ijevim-plugin",
+ "ijevim-tui",
+ "regex",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ijevim-core"
+version = "0.1.0"
+dependencies = [
  "regex",
  "ropey",
- "rust_lisp",
- "serde_json",
- "syntect",
- "tempfile",
  "thiserror",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "ijevim-highlight"
+version = "0.1.0"
+dependencies = [
+ "syntect",
+]
+
+[[package]]
+name = "ijevim-plugin"
+version = "0.1.0"
+dependencies = [
+ "ijevim-core",
+ "libloading",
+ "mlua",
+ "quickjs-rusty",
+ "rust_lisp",
+ "serde_json",
+]
+
+[[package]]
+name = "ijevim-tui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ijevim-core",
+ "ijevim-highlight",
  "unicode-width",
 ]
 
