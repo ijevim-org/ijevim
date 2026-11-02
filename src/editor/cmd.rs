@@ -4,11 +4,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 impl Editor {
     pub(crate) async fn handle_command(&mut self, key: KeyCode, modifiers: KeyModifiers) {
-        if self.engine.state.has_confirmation() {
-            self.handle_confirmation(key).await;
-            return;
-        }
-
         match key {
             KeyCode::Enter => {
                 let cmd = self.engine.state.command_buffer.trim().to_string();
@@ -96,24 +91,29 @@ impl Editor {
                         self.needs_render = true;
                     }
                     "messages" => {
-                        let history: Vec<_> =
-                            self.engine.state.message_history.iter().cloned().collect();
-                        if history.is_empty() {
+                        if self.engine.state.message_history.is_empty() {
                             self.engine
                                 .state
                                 .push_message(MessageLevel::Info, "No messages".to_string());
                         } else {
-                            // Display all messages in history
-                            for msg in history {
-                                let prefix = match msg.level {
-                                    MessageLevel::Error => "[ERROR]",
-                                    MessageLevel::Warning => "[WARN]",
-                                    MessageLevel::Info => "[INFO]",
-                                };
-                                self.engine
-                                    .state
-                                    .push_message(msg.level, format!("{} {}", prefix, msg.text));
-                            }
+                            // Read the history without re-inserting it, otherwise
+                            // every `:messages` duplicates the whole log.
+                            let text = self
+                                .engine
+                                .state
+                                .message_history
+                                .iter()
+                                .map(|msg| {
+                                    let prefix = match msg.level {
+                                        MessageLevel::Error => "[ERROR]",
+                                        MessageLevel::Warning => "[WARN]",
+                                        MessageLevel::Info => "[INFO]",
+                                    };
+                                    format!("{} {}", prefix, msg.text)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" | ");
+                            self.engine.state.last_message = Some(text);
                         }
                     }
                     cmd if cmd.starts_with("e ") || cmd == "e." => {
@@ -489,44 +489,54 @@ impl Editor {
         };
 
         let mut replacements = 0;
+        let mut edits: Vec<crate::undo::Edit> = Vec::new();
 
-        // We need to process lines in reverse order if substituting across multiple
-        // lines, because inserts/deletes shift line indices.
+        // Process lines bottom-up so earlier line indices stay valid, and treat
+        // the trailing newline as part of the line. Otherwise substituting N
+        // lines joins them all into one.
         for line_idx in (start_line..=end_line).rev() {
-            let line = self.engine.buffer.get_line(line_idx);
-            let new_line = if global {
-                re.replace_all(&line, replacement)
+            let old_text = self.engine.buffer.get_line(line_idx);
+            let new_text = if global {
+                re.replace_all(&old_text, replacement).to_string()
             } else {
-                re.replace(&line, replacement)
+                re.replace(&old_text, replacement).to_string()
             };
-            if new_line != line {
-                replacements += 1;
-                let old_chars = line.chars().count();
-                let mod_count = self.engine.buffer.modification_count();
-
-                use crate::undo::{Edit, EditType};
-                let old_trimmed = line.trim_end_matches('\n').to_string();
-                let new_trimmed = new_line.trim_end_matches('\n').to_string();
-
-                // Push a single Replace undo entry instead of Delete+Insert.
-                self.engine.undo_manager.push(Edit {
-                    edit_type: EditType::Replace {
-                        line: line_idx,
-                        col: 0,
-                        old_text: old_trimmed.clone(),
-                        new_text: new_trimmed.clone(),
-                    },
-                    cursor_before: self.engine.state.cursor,
-                    cursor_after: self.engine.state.cursor,
-                    modification_count: mod_count,
-                });
-
-                // Replace the line content.
-                let char_start = self.engine.buffer.line_to_char(line_idx - 1);
-                let char_end = char_start + old_chars;
-                self.engine.buffer.remove_range(char_start, char_end);
-                self.engine.buffer.insert(line_idx, 0, &new_trimmed);
+            if new_text == old_text {
+                continue;
             }
+            replacements += 1;
+            let mod_count = self.engine.buffer.modification_count();
+
+            let char_start = self.engine.buffer.line_to_char(line_idx - 1);
+            let char_end = char_start + old_text.chars().count();
+            self.engine.buffer.remove_range(char_start, char_end);
+            self.engine.buffer.insert(line_idx, 0, &new_text);
+
+            edits.push(crate::undo::Edit {
+                edit_type: crate::undo::EditType::Replace {
+                    line: line_idx,
+                    col: 0,
+                    old_text,
+                    new_text,
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
+        }
+
+        // One `u` reverts the whole `:s`, like Vim. The group records the
+        // modification count from before the first substitution so undoing it
+        // restores the clean state.
+        if let Some(first) = edits.first() {
+            let modification_count = first.modification_count;
+            let cursor_before = first.cursor_before;
+            self.engine.undo_manager.push(crate::undo::Edit {
+                edit_type: crate::undo::EditType::Group { edits },
+                cursor_before,
+                cursor_after: self.engine.state.cursor,
+                modification_count,
+            });
         }
 
         self.engine.state.dirty = self.engine.buffer.is_dirty();
@@ -579,6 +589,7 @@ impl Editor {
     async fn save_and_emit(&mut self) {
         match self.engine.buffer.save_file().await {
             Ok(()) => {
+                self.engine.state.dirty = false;
                 self.engine
                     .plugin_manager
                     .emit(crate::types::PluginEvent::BufferSave {
@@ -605,6 +616,7 @@ impl Editor {
         match self.engine.buffer.save_to_path(&path).await {
             Ok(_) => {
                 self.engine.state.file_path = Some(path);
+                self.engine.state.dirty = false;
                 self.engine
                     .plugin_manager
                     .emit(crate::types::PluginEvent::BufferSave {
@@ -634,6 +646,7 @@ impl Editor {
         match self.engine.buffer.save_to_path(&path).await {
             Ok(_) => {
                 self.engine.state.file_path = Some(path);
+                self.engine.state.dirty = false;
                 self.engine
                     .plugin_manager
                     .emit(crate::types::PluginEvent::BufferSave {

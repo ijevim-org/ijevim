@@ -25,11 +25,6 @@ impl KeymapHandler for EmacsKeymap {
 
             editor.emit_key_event(key, modifiers);
 
-            if editor.engine.state.has_confirmation() {
-                editor.handle_confirmation(key).await;
-                return;
-            }
-
             // Handle C-x prefix state (stored in operator_state)
             if editor.engine.operator_state.emacs_cx_prefix {
                 editor.engine.operator_state.emacs_cx_prefix = false;

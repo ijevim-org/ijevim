@@ -1427,3 +1427,202 @@ async fn vim_command_line_ctrl_w() {
         "Ctrl-w should delete ' bar'"
     );
 }
+
+// ── Regression tests ────────────────────────────────────────────────
+// Each of these pins a bug that shipped: they must stay green.
+
+async fn press_key(ed: &mut Editor, key: KeyCode) {
+    ed.handle_key_for_test(key, KeyModifiers::NONE).await;
+}
+
+async fn type_keys(ed: &mut Editor, keys: &str) {
+    for c in keys.chars() {
+        press_key(ed, KeyCode::Char(c)).await;
+    }
+}
+
+/// Run an ex command (`:cmd<Enter>`) from normal mode.
+async fn run_command(ed: &mut Editor, cmd: &str) {
+    press_key(ed, KeyCode::Char(':')).await;
+    type_keys(ed, cmd).await;
+    press_key(ed, KeyCode::Enter).await;
+}
+
+#[tokio::test]
+async fn substitute_keeps_line_breaks() {
+    let mut ed = test_vim_editor("aaa\nbbb\nccc\n");
+
+    run_command(&mut ed, "%s/[abc]/X/g").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(
+        buf, "XXX\nXXX\nXXX\n",
+        "each line must stay on its own line"
+    );
+}
+
+#[tokio::test]
+async fn substitute_is_one_undo_step() {
+    let mut ed = test_vim_editor("aaa\nbbb\n");
+
+    run_command(&mut ed, "%s/a/X/g").await;
+    press_key(&mut ed, KeyCode::Char('u')).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "aaa\nbbb\n");
+}
+
+#[tokio::test]
+async fn visual_delete_is_undoable() {
+    let mut ed = test_vim_editor("abcdef\n");
+
+    press_key(&mut ed, KeyCode::Char('v')).await;
+    press_key(&mut ed, KeyCode::Char('l')).await;
+    press_key(&mut ed, KeyCode::Char('l')).await;
+    press_key(&mut ed, KeyCode::Char('d')).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "def\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abcdef\n", "visual delete must be undoable");
+}
+
+#[tokio::test]
+async fn vim_dirty_quit_confirmation_accept_exits() {
+    let mut ed = test_vim_editor("abc\n");
+    ed.running = true;
+    press_key(&mut ed, KeyCode::Char('i')).await;
+    type_keys(&mut ed, "x").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    run_command(&mut ed, "q").await;
+    assert!(ed.running, "dirty quit must ask for confirmation first");
+
+    press_key(&mut ed, KeyCode::Char('y')).await;
+    assert!(!ed.running, "y must accept the quit prompt in Vim mode");
+}
+
+#[tokio::test]
+async fn named_register_yank_and_paste() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+
+    type_keys(&mut ed, "\"ayy").await;
+    type_keys(&mut ed, "\"ap").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abc\nabc\ndef\n");
+}
+
+#[tokio::test]
+async fn mark_set_and_jump() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+
+    type_keys(&mut ed, "ma").await;
+    press_key(&mut ed, KeyCode::Char('j')).await;
+
+    let (_, line, _, _) = ed.snapshot_for_test();
+    assert_eq!(line, 2);
+
+    type_keys(&mut ed, "`a").await;
+    let (_, line, _, _) = ed.snapshot_for_test();
+    assert_eq!(line, 1, "`a must jump back to the mark");
+}
+
+#[tokio::test]
+async fn emacs_enter_does_not_duplicate_text() {
+    let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless editor");
+    ed.set_buffer_for_test("abc\n");
+
+    ed.handle_key_for_test(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        .await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "a\nbc\n");
+}
+
+#[tokio::test]
+async fn emacs_enter_handles_multibyte() {
+    let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless editor");
+    ed.set_buffer_for_test("あいう\n");
+
+    ed.handle_key_for_test(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        .await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "あ\nいう\n");
+}
+
+#[tokio::test]
+async fn join_is_undoable() {
+    let mut ed = test_vim_editor("a\nb\n");
+
+    press_key(&mut ed, KeyCode::Char('J')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "a b\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "a\nb\n");
+}
+
+#[tokio::test]
+async fn insert_mode_tab_inserts_whitespace() {
+    let mut ed = test_vim_editor("abc\n");
+
+    press_key(&mut ed, KeyCode::Char('i')).await;
+    press_key(&mut ed, KeyCode::Tab).await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_ne!(buf, "abc\n", "Tab must insert indentation in Insert mode");
+    assert!(
+        buf.starts_with(' ') || buf.starts_with('\t'),
+        "expected indentation, got {:?}",
+        buf
+    );
+}
+
+#[tokio::test]
+async fn three_dd_is_one_undo_step() {
+    let mut ed = test_vim_editor("1\n2\n3\n4\n");
+
+    type_keys(&mut ed, "3dd").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "4\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "1\n2\n3\n4\n", "3dd must undo in one step");
+}
+
+#[tokio::test]
+async fn change_inner_word_is_undoable() {
+    let mut ed = test_vim_editor("hello world\n");
+
+    type_keys(&mut ed, "ciw").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, " world\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n");
+}
+
+#[tokio::test]
+async fn messages_command_does_not_grow_history() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "messages").await;
+    let after_first = ed.engine.state.message_history.len();
+    run_command(&mut ed, "messages").await;
+    let after_second = ed.engine.state.message_history.len();
+    assert_eq!(
+        after_first, after_second,
+        ":messages must not append the whole log back into itself"
+    );
+}

@@ -68,72 +68,26 @@ impl Editor {
         register: char,
         inner: bool,
     ) {
-        if let KeyCode::Char('w') = key {
-            if inner {
-                let (word, start, _) = self
-                    .engine
-                    .buffer
-                    .get_word_range(self.engine.state.cursor.line, self.engine.state.cursor.col);
-                if !word.is_empty() {
-                    let word_chars = word.chars().count();
-                    let content = self.engine.buffer.get_char_range(
-                        self.engine.state.cursor.line,
-                        start,
-                        self.engine.state.cursor.line,
-                        start + word_chars,
-                    );
-                    self.engine.register.set(register, &content);
-                    let char_start = self
-                        .engine
-                        .buffer
-                        .line_to_char(self.engine.state.cursor.line - 1)
-                        + start;
-                    let char_end = char_start + word_chars;
-                    self.engine.buffer.remove_range(char_start, char_end);
-                }
-            }
-            let prev_mode = self.engine.state.mode;
-            self.engine.state.mode = crate::types::Mode::Insert;
-            self.engine
-                .plugin_manager
-                .emit(crate::types::PluginEvent::ModeChange {
-                    from: prev_mode,
-                    to: crate::types::Mode::Insert,
-                });
-            self.on_buffer_modified();
-        } else if let KeyCode::Char('W') = key {
-            // `cW` — change WORD
-            let (word, start, _end) = self
-                .engine
-                .buffer
-                .get_word_range_upper(self.engine.state.cursor.line, self.engine.state.cursor.col);
-            if !word.is_empty() {
-                let word_chars = word.chars().count();
-                let content = self.engine.buffer.get_char_range(
-                    self.engine.state.cursor.line,
-                    start,
-                    self.engine.state.cursor.line,
-                    start + word_chars,
-                );
-                self.engine.register.set(register, &content);
-                let char_start = self
-                    .engine
-                    .buffer
-                    .line_to_char(self.engine.state.cursor.line - 1)
-                    + start;
-                let char_end = char_start + word_chars;
-                self.engine.buffer.remove_range(char_start, char_end);
-            }
-            let prev_mode = self.engine.state.mode;
-            self.engine.state.mode = crate::types::Mode::Insert;
-            self.engine
-                .plugin_manager
-                .emit(crate::types::PluginEvent::ModeChange {
-                    from: prev_mode,
-                    to: crate::types::Mode::Insert,
-                });
-            self.on_buffer_modified();
+        if !matches!(key, KeyCode::Char(_)) {
+            return;
         }
+
+        // The delete path already selects the right range for every text
+        // object (word/WORD/quotes/brackets) and records the undo entry, so
+        // change is "delete the object, then insert".
+        self.handle_text_object(key, register, inner).await;
+
+        let prev_mode = self.engine.state.mode;
+        self.engine.state.mode = crate::types::Mode::Insert;
+        self.engine.insert_state.accum.clear();
+        self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
+        self.engine
+            .plugin_manager
+            .emit(crate::types::PluginEvent::ModeChange {
+                from: prev_mode,
+                to: crate::types::Mode::Insert,
+            });
+        self.on_buffer_modified();
     }
 
     #[allow(clippy::single_match)]

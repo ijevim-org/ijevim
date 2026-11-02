@@ -1,5 +1,5 @@
-use ijevim_highlight::Style;
 use crossterm::style::Color;
+use ijevim_highlight::Style;
 use std::fmt::Write;
 
 /// Per-cell styling — lightweight, Copy-friendly.
@@ -255,33 +255,22 @@ impl ScreenBuffer {
 // ── Helpers for building styled character arrays ──
 
 /// Convert a syntect `Style` into our `CellStyle`.
+///
+/// The syntect-specific extraction lives in `ijevim-highlight`, so this
+/// crate never has to depend on `syntect` itself.
 #[cfg(feature = "syntax")]
 pub fn from_syntect_style(s: &Style) -> CellStyle {
+    let c = ijevim_highlight::StyleColors::from_style(s);
     CellStyle {
-        fg: syntect_color(s.foreground),
-        bg: syntect_color(s.background),
-        bold: s
-            .font_style
-            .contains(syntect::highlighting::FontStyle::BOLD),
-        italic: s
-            .font_style
-            .contains(syntect::highlighting::FontStyle::ITALIC),
-        underline: s
-            .font_style
-            .contains(syntect::highlighting::FontStyle::UNDERLINE),
-    }
-}
-
-#[cfg(feature = "syntax")]
-fn syntect_color(c: syntect::highlighting::Color) -> Color {
-    if c.a == 0 {
-        Color::Reset
-    } else {
-        Color::Rgb {
-            r: c.r,
-            g: c.g,
-            b: c.b,
-        }
+        fg: c
+            .fg
+            .map_or(Color::Reset, |(r, g, b)| Color::Rgb { r, g, b }),
+        bg: c
+            .bg
+            .map_or(Color::Reset, |(r, g, b)| Color::Rgb { r, g, b }),
+        bold: c.bold,
+        italic: c.italic,
+        underline: c.underline,
     }
 }
 

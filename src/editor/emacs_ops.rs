@@ -193,25 +193,46 @@ impl Editor {
     }
 
     pub fn kill_word(&mut self) {
-        let (_, _, end_col) = self
-            .engine
-            .buffer
-            .get_word_range(self.engine.state.cursor.line, self.engine.state.cursor.col);
-        if end_col > self.engine.state.cursor.col {
-            self.engine.buffer.delete_range(
-                self.engine.state.cursor.line,
-                self.engine.state.cursor.col,
-                self.engine.state.cursor.line,
-                end_col,
-            );
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let (_, _, end_col) = self.engine.buffer.get_word_range(line, col);
+        let mod_count = self.engine.buffer.modification_count();
+
+        if end_col > col {
+            let deleted = self.engine.buffer.delete_range(line, col, line, end_col);
+            if !deleted.is_empty() {
+                self.engine.kill_ring.push(&deleted);
+            }
+            self.engine.undo_manager.push(Edit {
+                edit_type: EditType::Delete {
+                    line,
+                    col,
+                    text: deleted,
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
             self.on_buffer_modified();
-        } else if self.engine.state.cursor.line < self.engine.buffer.line_count() {
-            self.engine.buffer.delete_range(
-                self.engine.state.cursor.line,
-                self.engine.state.cursor.col,
-                self.engine.state.cursor.line + 1,
-                0,
-            );
+        } else if line < self.engine.buffer.line_count() {
+            // C-k at end of line joins the next line, like Emacs.
+            let join_col = self
+                .engine
+                .buffer
+                .line_char_len(line)
+                .saturating_sub(1)
+                .max(col);
+            self.engine.buffer.merge_with_prev_line(line + 1);
+            self.engine.kill_ring.push("\n");
+            self.engine.undo_manager.push(Edit {
+                edit_type: EditType::Merge {
+                    line,
+                    deleted_newline_col: join_col,
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
             self.on_buffer_modified();
         }
     }
@@ -286,18 +307,20 @@ impl Editor {
     }
 
     pub(crate) fn insert_newline(&mut self) {
-        let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-        let (_, after) = line.split_at(self.engine.state.cursor.col);
-        self.engine.buffer.insert(
-            self.engine.state.cursor.line,
-            self.engine.state.cursor.col,
-            "\n",
-        );
-        if !after.is_empty() {
-            self.engine
-                .buffer
-                .insert(self.engine.state.cursor.line + 1, 0, after);
-        }
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let mod_count = self.engine.buffer.modification_count();
+
+        // Splitting the line is a single newline insertion: everything after
+        // the cursor stays on the new line automatically.
+        self.engine.buffer.insert(line, col, "\n");
+
+        self.engine.undo_manager.push(Edit {
+            edit_type: EditType::Split { line, col },
+            cursor_before: self.engine.state.cursor,
+            cursor_after: self.engine.state.cursor,
+            modification_count: mod_count,
+        });
         self.engine.state.cursor.line += 1;
         self.engine.state.cursor.col = 0;
         self.on_buffer_modified();

@@ -1,10 +1,10 @@
-use ijevim_core::buffer::TextBuffer;
-use ijevim_highlight::Style;
 use crate::review::ReviewState;
 use crate::screen::{build_styled_chars, CellStyle, ScreenBuffer};
 use crate::terminal::Terminal;
-use ijevim_core::types::{EditorState, MessageLevel, Mode, VisualType, Window, WindowLayout};
 use crossterm::style::Color;
+use ijevim_core::buffer::TextBuffer;
+use ijevim_core::types::{EditorState, MessageLevel, Mode, VisualType, Window, WindowLayout};
+use ijevim_highlight::Style;
 use std::io;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;

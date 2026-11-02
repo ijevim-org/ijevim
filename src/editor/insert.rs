@@ -90,6 +90,21 @@ impl Editor {
                 self.engine.insert_state.accum.push('\n');
                 self.on_buffer_modified();
             }
+            KeyCode::Tab => {
+                let text = if self.engine.state.expandtab {
+                    " ".repeat(self.engine.state.shiftwidth)
+                } else {
+                    "\t".to_string()
+                };
+                self.engine.buffer.insert(
+                    self.engine.state.cursor.line,
+                    self.engine.state.cursor.col,
+                    &text,
+                );
+                self.engine.state.cursor.col += text.chars().count();
+                self.engine.insert_state.accum.push_str(&text);
+                self.on_buffer_modified();
+            }
             KeyCode::Char(c) => {
                 self.engine.buffer.insert_char(
                     self.engine.state.cursor.line,
@@ -107,28 +122,37 @@ impl Editor {
     /// Delete from cursor to beginning of the current word (Ctrl-w in Insert mode).
     pub(crate) fn insert_delete_word_backward(&mut self) {
         let line = self.engine.state.cursor.line;
-        let col = self.engine.state.cursor.col;
-        let line_str = self.engine.buffer.get_line(line);
-        let prefix: String = line_str.chars().take(col).collect();
-
-        // Find the start of the word before cursor.
-        let start = prefix
-            .chars()
-            .rev()
-            .position(|c| c.is_whitespace())
-            .map(|pos| col - pos)
-            .unwrap_or(0);
-
-        let deleted = &prefix[start..col];
-        if !deleted.is_empty() {
-            self.engine.buffer.delete_range(line, start, line, col);
-            self.engine.state.cursor.col = start;
-            // Remove deleted chars from accumulator
-            for _ in deleted.chars() {
-                self.engine.insert_state.accum.pop();
-            }
-            self.on_buffer_modified();
+        let col = self
+            .engine
+            .state
+            .cursor
+            .col
+            .min(self.engine.buffer.line_char_len(line));
+        if col == 0 {
+            return;
         }
+
+        // Work in character indices throughout. Slicing the line as a `String`
+        // with a character column would panic on multi-byte input.
+        let chars = self.engine.buffer.line_chars(line);
+        let mut start = col;
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if start == col {
+            return;
+        }
+
+        self.engine.buffer.delete_range(line, start, line, col);
+        self.engine.state.cursor.col = start;
+        // Remove deleted chars from accumulator
+        for _ in 0..(col - start) {
+            self.engine.insert_state.accum.pop();
+        }
+        self.on_buffer_modified();
     }
 
     /// Delete from cursor to beginning of line (Ctrl-u in Insert mode).

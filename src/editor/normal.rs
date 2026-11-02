@@ -13,6 +13,38 @@ impl Editor {
             return;
         }
 
+        // ── Register prefix (`"x`) ───────────────────────────────────
+        // The sentinel `'\0'` means "waiting for the register name".
+        if self.engine.operator_state.register == Some('\0') {
+            self.engine.operator_state.register = None;
+            if let KeyCode::Char(c) = key {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '+' || c == '_' {
+                    self.engine.operator_state.register = Some(c);
+                    self.needs_render = true;
+                    return;
+                }
+                if c == '"' {
+                    // `""` selects the unnamed register, which is the default.
+                    self.needs_render = true;
+                    return;
+                }
+            }
+        }
+
+        // ── Mark prefix (m{a-z}, `{a-z}, '{a-z}) ────────────────────
+        if let Some(pending) = self.engine.operator_state.mark {
+            self.engine.operator_state.mark = None;
+            if let KeyCode::Char(c) = key {
+                if (pending == 'm' && c.is_ascii_lowercase())
+                    || (pending != 'm' && !c.is_whitespace())
+                {
+                    self.handle_mark(pending, c);
+                    self.needs_render = true;
+                    return;
+                }
+            }
+        }
+
         // ── Numeric count prefix ─────────────────────────────────
         // Accumulate digits 1-9 into pending_count.
         // '0' is only accumulated if there's already a pending count (e.g., "20j").
@@ -72,7 +104,8 @@ impl Editor {
                 }
                 return;
             }
-            PendingOperator::AwaitingOperator { op, register: _ } => {
+            PendingOperator::AwaitingOperator { op, register } => {
+                self.engine.operator_state.register = register;
                 let count = self.take_count();
                 self.handle_operator(op, key, count).await;
                 return;
@@ -247,11 +280,7 @@ impl Editor {
             }
             KeyCode::Char('S') => {
                 let _count = self.take_count();
-                let content = self.engine.buffer.get_line(self.engine.state.cursor.line);
-                self.engine.register.set('"', &content);
-                self.engine
-                    .buffer
-                    .delete_line(self.engine.state.cursor.line);
+                self.delete_line('"');
                 let prev_mode = self.engine.state.mode;
                 self.engine.state.mode = Mode::Insert;
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
@@ -408,7 +437,7 @@ impl Editor {
                 self.paste(true).await;
             }
             KeyCode::Char('"') => {
-                self.engine.operator_state.register = Some('"');
+                self.engine.operator_state.register = Some('\0');
             }
             KeyCode::Char('m') => {
                 self.engine.operator_state.mark = Some('m');
@@ -435,172 +464,149 @@ impl Editor {
                     }
                 }
             }
-            _ => {
-                match key {
-                    KeyCode::Char('g') => {
-                        let register = self.engine.operator_state.register.take();
-                        self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
-                            op: Operator::Goto,
-                            register,
-                        };
-                    }
-                    KeyCode::Char('G') => {
-                        let target = match self.engine.operator_state.count.take() {
-                            Some(c) => c.min(self.engine.buffer.line_count()).max(1),
-                            None => self.engine.buffer.line_count().max(1),
-                        };
-                        self.engine.state.cursor.line = target;
-                        let len = self.engine.buffer.line_char_len(target);
-                        self.engine.state.cursor.col = len.saturating_sub(1);
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('%') => {
-                        let _count = self.take_count();
-                        self.jump_to_matching_bracket();
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('x') => {
-                        let count = self.take_count();
-                        for _ in 0..count {
-                            self.delete_char('"');
-                        }
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('.') => {
-                        let _count = self.take_count();
-                        self.repeat_last_action().await;
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('w') => {
-                        let count = self.take_count();
-                        for _ in 0..count {
-                            self.move_word_forward();
-                        }
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('b') => {
-                        let count = self.take_count();
-                        for _ in 0..count {
-                            self.move_word_backward();
-                        }
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('e') => {
-                        let count = self.take_count();
-                        for _ in 0..count {
-                            self.move_word_end();
-                        }
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('o') => {
-                        let _count = self.take_count();
-                        self.open_line(false);
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('O') => {
-                        let _count = self.take_count();
-                        self.open_line(true);
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('c') => {
-                        let register = self.engine.operator_state.register.take();
-                        self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
-                            op: Operator::Change,
-                            register,
-                        };
-                    }
-                    KeyCode::Char('J') => {
-                        let count = self.take_count();
-                        for _ in 0..count {
-                            self.join_lines();
-                        }
-                        self.needs_render = true;
-                    }
-                    KeyCode::Char('>') => {
-                        let register = self.engine.operator_state.register.take();
-                        self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
-                            op: Operator::IndentRight,
-                            register,
-                        };
-                    }
-                    KeyCode::Char('<') => {
-                        let register = self.engine.operator_state.register.take();
-                        self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
-                            op: Operator::IndentLeft,
-                            register,
-                        };
-                    }
-                    KeyCode::Char('z') => {
-                        let register = self.engine.operator_state.register.take();
-                        self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
-                            op: Operator::Scroll,
-                            register,
-                        };
-                    }
-                    KeyCode::Char('Z') => {
-                        let register = self.engine.operator_state.register.take();
-                        self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
-                            op: Operator::SaveQuit,
-                            register,
-                        };
-                    }
-                    KeyCode::Char('s') => {
-                        let _count = self.take_count();
+            _ => match key {
+                KeyCode::Char('g') => {
+                    let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
+                        op: Operator::Goto,
+                        register,
+                    };
+                }
+                KeyCode::Char('G') => {
+                    let target = match self.engine.operator_state.count.take() {
+                        Some(c) => c.min(self.engine.buffer.line_count()).max(1),
+                        None => self.engine.buffer.line_count().max(1),
+                    };
+                    self.engine.state.cursor.line = target;
+                    let len = self.engine.buffer.line_char_len(target);
+                    self.engine.state.cursor.col = len.saturating_sub(1);
+                    self.needs_render = true;
+                }
+                KeyCode::Char('%') => {
+                    let _count = self.take_count();
+                    self.jump_to_matching_bracket();
+                    self.needs_render = true;
+                }
+                KeyCode::Char('x') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
                         self.delete_char('"');
-                        let prev_mode = self.engine.state.mode;
-                        self.engine.state.mode = Mode::Insert;
-                        self.engine.plugin_manager.emit(PluginEvent::ModeChange {
-                            from: prev_mode,
-                            to: Mode::Insert,
-                        });
-                        self.needs_render = true;
                     }
-                    KeyCode::Char('~') => {
-                        let count = self.take_count();
-                        for _ in 0..count {
-                            self.toggle_case_char();
-                            let line_len = self
-                                .engine
-                                .buffer
-                                .line_char_len(self.engine.state.cursor.line);
-                            self.engine.state.cursor.col =
-                                (self.engine.state.cursor.col + 1).min(line_len.saturating_sub(1));
-                        }
-                        self.engine.dot_last_action = Some(DotAction::ToggleCase);
-                        self.needs_render = true;
-                    }
-                    _ => {}
+                    self.needs_render = true;
                 }
-
-                if let Some(pending) = self.engine.operator_state.mark {
-                    if let KeyCode::Char(c) = key {
-                        if (pending == 'm' && c.is_ascii_lowercase())
-                            || (pending == '`' || pending == '\'')
-                        {
-                            self.handle_mark(pending, c);
-                            self.engine.operator_state.mark = None;
-                            self.needs_render = true;
-                            return;
-                        }
-                    }
-                    self.engine.operator_state.mark = None;
+                KeyCode::Char('.') => {
+                    let _count = self.take_count();
+                    self.repeat_last_action().await;
+                    self.needs_render = true;
                 }
-                if let Some(_pending_reg) = self.engine.operator_state.register {
-                    if let KeyCode::Char(c) = key {
-                        if c.is_ascii_lowercase() {
-                            self.engine.operator_state.register = Some(c);
-                            return;
-                        }
+                KeyCode::Char('w') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.move_word_forward();
                     }
-                    self.engine.operator_state.register = None;
+                    self.needs_render = true;
                 }
-            }
+                KeyCode::Char('b') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.move_word_backward();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char('e') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.move_word_end();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char('o') => {
+                    let _count = self.take_count();
+                    self.open_line(false);
+                    self.needs_render = true;
+                }
+                KeyCode::Char('O') => {
+                    let _count = self.take_count();
+                    self.open_line(true);
+                    self.needs_render = true;
+                }
+                KeyCode::Char('c') => {
+                    let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
+                        op: Operator::Change,
+                        register,
+                    };
+                }
+                KeyCode::Char('J') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.join_lines();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char('>') => {
+                    let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
+                        op: Operator::IndentRight,
+                        register,
+                    };
+                }
+                KeyCode::Char('<') => {
+                    let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
+                        op: Operator::IndentLeft,
+                        register,
+                    };
+                }
+                KeyCode::Char('z') => {
+                    let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
+                        op: Operator::Scroll,
+                        register,
+                    };
+                }
+                KeyCode::Char('Z') => {
+                    let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
+                        op: Operator::SaveQuit,
+                        register,
+                    };
+                }
+                KeyCode::Char('s') => {
+                    let _count = self.take_count();
+                    self.delete_char('"');
+                    let prev_mode = self.engine.state.mode;
+                    self.engine.state.mode = Mode::Insert;
+                    self.engine.plugin_manager.emit(PluginEvent::ModeChange {
+                        from: prev_mode,
+                        to: Mode::Insert,
+                    });
+                    self.needs_render = true;
+                }
+                KeyCode::Char('~') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.toggle_case_char();
+                        let line_len = self
+                            .engine
+                            .buffer
+                            .line_char_len(self.engine.state.cursor.line);
+                        self.engine.state.cursor.col =
+                            (self.engine.state.cursor.col + 1).min(line_len.saturating_sub(1));
+                    }
+                    self.engine.dot_last_action = Some(DotAction::ToggleCase);
+                    self.needs_render = true;
+                }
+                _ => {}
+            },
         }
     }
 
     pub(crate) async fn handle_operator(&mut self, op: Operator, key: KeyCode, count: usize) {
-        let register = self.engine.operator_state.register.unwrap_or('"');
-        self.engine.operator_state.register = None;
+        let register = match self.engine.operator_state.register.take() {
+            Some(c) if c != '\0' => c,
+            _ => '"',
+        };
 
         match op {
             Operator::Yank => match key {
@@ -633,9 +639,14 @@ impl Editor {
             },
             Operator::Delete => match key {
                 KeyCode::Char('d') => {
+                    // `3dd` is a single undo step in Vim.
+                    let mut edits = Vec::new();
                     for _ in 0..count.max(1) {
-                        self.delete_line(register);
+                        if let Some(edit) = self.delete_line_edit(register) {
+                            edits.push(edit);
+                        }
                     }
+                    self.push_undo_group(edits);
                 }
                 KeyCode::Char('w') => {
                     self.delete_word(register);
@@ -658,13 +669,13 @@ impl Editor {
             },
             Operator::Change => match key {
                 KeyCode::Char('c') => {
-                    for _ in 0..count {
-                        let content = self.engine.buffer.get_line(self.engine.state.cursor.line);
-                        self.engine.register.set(register, &content);
-                        self.engine
-                            .buffer
-                            .delete_line(self.engine.state.cursor.line);
+                    let mut edits = Vec::new();
+                    for _ in 0..count.max(1) {
+                        if let Some(edit) = self.delete_line_edit(register) {
+                            edits.push(edit);
+                        }
                     }
+                    self.push_undo_group(edits);
                     let prev_mode = self.engine.state.mode;
                     self.engine.state.mode = Mode::Insert;
                     self.engine.plugin_manager.emit(PluginEvent::ModeChange {
@@ -894,20 +905,33 @@ impl Editor {
     }
 
     fn delete_line(&mut self, register: char) {
+        if let Some(edit) = self.delete_line_edit(register) {
+            self.engine.undo_manager.push(edit);
+        }
+    }
+
+    /// Delete the current line and return the undo entry without pushing it.
+    ///
+    /// Callers that delete several lines (e.g. `3dd`) collect the entries and
+    /// push them as one [`EditType::Group`].
+    fn delete_line_edit(&mut self, register: char) -> Option<Edit> {
         let line = self.engine.state.cursor.line;
         let mod_count = self.engine.buffer.modification_count();
         let content = self.engine.buffer.delete_line(line);
+        if content.is_empty() {
+            return None;
+        }
         self.engine.register.set(register, &content);
 
-        self.engine.undo_manager.push(Edit {
+        let edit = Edit {
             edit_type: EditType::DeleteLine {
                 line,
-                text: content.clone(),
+                text: content,
             },
             cursor_before: self.engine.state.cursor,
             cursor_after: self.engine.state.cursor,
             modification_count: mod_count,
-        });
+        };
 
         let line_count = self.engine.buffer.line_count();
         if line > line_count {
@@ -919,6 +943,25 @@ impl Editor {
             .line_char_len(self.engine.state.cursor.line);
         self.engine.state.cursor.col = self.engine.state.cursor.col.min(len.saturating_sub(1));
         self.on_buffer_modified();
+        Some(edit)
+    }
+
+    /// Push a set of edits as a single undo step. No-op for an empty set.
+    ///
+    /// The group must carry the modification count and cursor from *before* the
+    /// first edit, otherwise undoing it leaves the buffer marked dirty.
+    pub(crate) fn push_undo_group(&mut self, edits: Vec<Edit>) {
+        let Some(first) = edits.first() else {
+            return;
+        };
+        let modification_count = first.modification_count;
+        let cursor_before = first.cursor_before;
+        self.engine.undo_manager.push(Edit {
+            edit_type: EditType::Group { edits },
+            cursor_before,
+            cursor_after: self.engine.state.cursor,
+            modification_count,
+        });
     }
 
     fn delete_word(&mut self, register: char) {
@@ -940,7 +983,11 @@ impl Editor {
     }
 
     async fn paste(&mut self, before: bool) {
-        let content = self.engine.register.get_default();
+        let register = match self.engine.operator_state.register.take() {
+            Some(c) if c != '\0' => c,
+            _ => '"',
+        };
+        let content = self.engine.register.get(register);
         if content.is_empty() {
             return;
         }
@@ -1208,14 +1255,8 @@ impl Editor {
             && !current_stripped.ends_with('\t')
             && !next_stripped.starts_with(' ')
             && !next_stripped.is_empty();
-        if needs_space {
-            self.engine.buffer.insert(line, join_pos, " ");
-            self.engine.state.cursor.col = join_pos + 1;
-        } else {
-            self.engine.state.cursor.col = join_pos;
-        }
 
-        self.engine.undo_manager.push(Edit {
+        let merge_edit = Edit {
             edit_type: EditType::Merge {
                 line,
                 deleted_newline_col: join_pos,
@@ -1223,7 +1264,30 @@ impl Editor {
             cursor_before: self.engine.state.cursor,
             cursor_after: self.engine.state.cursor,
             modification_count: mod_count,
-        });
+        };
+
+        if needs_space {
+            self.engine.buffer.insert(line, join_pos, " ");
+            self.engine.state.cursor.col = join_pos + 1;
+            // The separating space is part of the join: undo must remove it
+            // together with restoring the newline.
+            self.push_undo_group(vec![
+                merge_edit,
+                Edit {
+                    edit_type: EditType::Insert {
+                        line,
+                        col: join_pos,
+                        text: " ".to_string(),
+                    },
+                    cursor_before: self.engine.state.cursor,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                },
+            ]);
+        } else {
+            self.engine.state.cursor.col = join_pos;
+            self.engine.undo_manager.push(merge_edit);
+        }
 
         self.engine.dot_last_action = Some(DotAction::Join);
         self.on_buffer_modified();

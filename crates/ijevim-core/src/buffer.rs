@@ -286,20 +286,6 @@ impl TextBuffer {
         self.dirty = true;
     }
 
-    /// Test-only: force the dirty flag without going through a real mutation.
-    /// Crate-private so unit tests in `editor/` can set up quit-confirmation
-    /// scenarios without having to type a character first.
-    #[cfg(test)]
-    pub fn force_dirty(&mut self, dirty: bool) {
-        if dirty {
-            // Increment past `saved_modification_count` to make `is_dirty()` true.
-            self.modification_count = self.saved_modification_count + 1;
-            self.dirty = true;
-        } else {
-            self.mark_clean();
-        }
-    }
-
     pub fn get_word_at(&self, line: usize, col: usize) -> (String, usize, usize) {
         if line < 1 || line > self.line_count() {
             return (String::new(), 0, 0);

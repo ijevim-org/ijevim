@@ -54,7 +54,8 @@ fn run_git_diff(args: &ReviewArgs) -> Result<String, String> {
 fn diff_cmd(args: &[&str]) -> Result<String, String> {
     let mut all = vec!["diff"];
     all.extend_from_slice(args);
-    let output = ijevim_core::git::raw(&all).map_err(|e| format!("Failed to run git diff: {}", e))?;
+    let output =
+        ijevim_core::git::raw(&all).map_err(|e| format!("Failed to run git diff: {}", e))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
