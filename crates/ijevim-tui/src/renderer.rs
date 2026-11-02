@@ -12,6 +12,8 @@ use unicode_width::UnicodeWidthChar;
 const LINE_NUMBER_FG: Color = Color::AnsiValue(240);
 const CURRENT_LINE_BG: Color = Color::AnsiValue(235);
 const VISUAL_SELECTION_BG: Color = Color::AnsiValue(237);
+/// Background for `hlsearch` matches.
+const SEARCH_MATCH_BG: Color = Color::AnsiValue(58);
 const STATUS_BAR_BG: Color = Color::AnsiValue(236);
 const STATUS_INFO_BG: Color = Color::AnsiValue(21);
 const STATUS_WARN_BG: Color = Color::AnsiValue(226);
@@ -304,23 +306,46 @@ impl Renderer {
                 && buffer
                     .selected_entry(vline.buffer_line)
                     .is_some_and(|e| e.is_dir);
+            // `hlsearch` matches for this line, as character ranges. Computed
+            // once per line and then looked up per cell through `source_cols`,
+            // so tab expansion cannot shift the highlight.
+            let search_ranges: Vec<(usize, usize)> = if state.hlsearch {
+                match state.search_pattern.as_deref() {
+                    Some(pattern) if !pattern.is_empty() => {
+                        search_match_ranges(&buffer.get_line(vline.buffer_line), pattern)
+                    }
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            let selection = self.selection_line_range(state, buffer, vline.buffer_line);
+
             for (col, (ch, style)) in vline.styled_chars.iter().enumerate() {
                 let target_col = window.col_start + line_number_prefix + col;
                 if target_col < window.col_end && target_col < total_cols {
                     let mut cell_style = *style;
+                    let buf_col = vline.source_cols.get(col).copied().unwrap_or(col);
+
                     // Visual/highlight selection background
-                    if let Some((sel_start, sel_end)) =
-                        self.selection_line_range(state, buffer, vline.buffer_line)
+                    let selected = match selection {
+                        Some((sel_start, sel_end)) => buf_col >= sel_start && buf_col < sel_end,
+                        None => false,
+                    };
+                    if selected {
+                        cell_style.bg = VISUAL_SELECTION_BG;
+                    } else if search_ranges
+                        .iter()
+                        .any(|(start, end)| buf_col >= *start && buf_col < *end)
                     {
-                        let buf_col = vline.source_cols.get(col).copied().unwrap_or(col);
-                        if buf_col >= sel_start && buf_col < sel_end {
-                            cell_style.bg = VISUAL_SELECTION_BG;
-                        }
+                        cell_style.bg = SEARCH_MATCH_BG;
                     }
-                    // Highlight the current line, but only in the focused window.
+                    // Highlight the current line, but only in the focused window
+                    // and never over a selection or a search match.
                     if is_focused
                         && vline.buffer_line == window.cursor.line
-                        && cell_style.bg != VISUAL_SELECTION_BG
+                        && !selected
+                        && cell_style.bg != SEARCH_MATCH_BG
                     {
                         cell_style.bg = CURRENT_LINE_BG;
                     }
@@ -832,6 +857,29 @@ pub(crate) fn wrap_styled(
     rows
 }
 
+/// Character ranges where `pattern` occurs in `line`.
+///
+/// Literal and case-sensitive, matching `TextBuffer::search` so the highlight
+/// and the jumps agree.
+fn search_match_ranges(line: &str, pattern: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let pat: Vec<char> = pattern.chars().collect();
+    if pat.is_empty() || pat.len() > chars.len() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + pat.len() <= chars.len() {
+        if chars[i..i + pat.len()] == pat[..] {
+            ranges.push((i, i + pat.len()));
+            i += pat.len();
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
 /// Find which display-width segment the given column falls into.
 fn find_segment_for_col(line: &str, col: usize, content_width: usize, tabstop: usize) -> usize {
     if content_width == 0 {
@@ -947,6 +995,21 @@ mod tests {
         // Cursor on 'x' is the 5th display cell (4 spaces + 'x').
         assert_eq!(display_col_within_segment(line, 1, 0, 4), 4);
         assert_eq!(find_segment_start_col(line, 0, 80, 4), 0);
+    }
+
+    #[test]
+    fn search_ranges_are_literal_and_non_overlapping() {
+        assert_eq!(search_match_ranges("foo bar foo", "foo"), vec![(0, 3), (8, 11)]);
+        assert_eq!(search_match_ranges("aaaa", "aa"), vec![(0, 2), (2, 4)]);
+        assert_eq!(search_match_ranges("foo", ""), Vec::new());
+        assert_eq!(search_match_ranges("foo", "foobar"), Vec::new());
+        assert_eq!(search_match_ranges("a.b", "."), vec![(1, 2)]);
+    }
+
+    #[test]
+    fn search_ranges_track_multibyte_chars() {
+        // Columns are character indices, not bytes.
+        assert_eq!(search_match_ranges("あいう あい", "あい"), vec![(0, 2), (4, 6)]);
     }
 
     /// Tabs must not wrap a line that fits once expanded.

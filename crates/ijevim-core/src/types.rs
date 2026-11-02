@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
@@ -143,14 +144,12 @@ impl WindowLayout {
 
         // Floor-scaled boundaries keep adjacent windows exactly contiguous:
         // `end(i) == start(i + 1)` stays true because both map through the
-        // same monotonic function.
-        let scale = |v: usize, old: usize, new: usize| -> usize {
-            if old == 0 {
-                0
-            } else {
-                v.saturating_mul(new) / old
-            }
+        // same monotonic function. `old` is non-zero here (checked above).
+        let scale = |v: usize, old: NonZeroUsize, new: usize| -> usize {
+            v.saturating_mul(new) / old.get()
         };
+        let old_rows = NonZeroUsize::new(old_rows).expect("checked above");
+        let old_cols = NonZeroUsize::new(old_cols).expect("checked above");
         for w in &mut self.windows {
             w.row_start = scale(w.row_start, old_rows, content_rows);
             w.row_end = scale(w.row_end, old_rows, content_rows);
@@ -533,6 +532,9 @@ pub struct EditorState {
     pub show_line_numbers: bool,
     pub show_relative_numbers: bool,
     pub hlsearch: bool,
+    /// Literal pattern highlighted by `hlsearch` in every window.
+    /// `None` (or `hlsearch == false`) disables the highlight.
+    pub search_pattern: Option<String>,
     pub wrap: bool,
     pub mark: Option<Position>,
     pub region_active: bool,
@@ -570,6 +572,7 @@ impl Default for EditorState {
             show_line_numbers: true,
             show_relative_numbers: false,
             hlsearch: true,
+            search_pattern: None,
             wrap: true,
             mark: None,
             region_active: false,

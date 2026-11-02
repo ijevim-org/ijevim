@@ -35,6 +35,7 @@ impl Editor {
     pub(crate) fn do_search(&mut self, query: &str, direction: SearchDirection) {
         self.engine.search_state.query = query.to_string();
         self.engine.search_state.direction = direction;
+        self.engine.state.search_pattern = Some(query.to_string());
         self.engine.search_state.results = self.engine.buffer.search(query);
 
         if self.engine.search_state.results.is_empty() {

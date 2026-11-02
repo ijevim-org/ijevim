@@ -1918,3 +1918,35 @@ async fn delete_word_big_operator() {
     let (buf, _, _, _) = ed.snapshot_for_test();
     assert_eq!(buf, "baz\n");
 }
+
+// ── hlsearch (B14) ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn search_records_the_pattern_for_highlighting() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    assert!(ed.engine.state.hlsearch, "hlsearch is on by default");
+    assert_eq!(
+        ed.engine.state.search_pattern.as_deref(),
+        Some("foo"),
+        "the renderer needs the pattern to paint matches"
+    );
+    assert_eq!(ed.engine.search_state.query, "foo");
+}
+
+#[tokio::test]
+async fn nohlsearch_disables_the_highlight() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    run_command(&mut ed, "nohlsearch").await;
+    assert!(!ed.engine.state.hlsearch);
+
+    run_command(&mut ed, "set hlsearch").await;
+    assert!(ed.engine.state.hlsearch, "`set hlsearch` must re-enable it");
+}

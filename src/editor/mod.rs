@@ -645,6 +645,7 @@ mod tests {
             show_line_numbers: true,
             show_relative_numbers: false,
             hlsearch: true,
+            search_pattern: None,
             wrap: true,
             mark: None,
             region_active: false,
