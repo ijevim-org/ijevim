@@ -30,6 +30,8 @@ pub struct OperatorState {
     pub mark: Option<char>,
     /// Pending macro playback: `Some('@')` waiting for register name.
     pub macro_play: Option<char>,
+    /// Operator-pending `g` prefix: waiting for the second key of `gg`.
+    pub pending_g: bool,
     /// Character to replace with in Replace mode; None means normal Replace.
     pub replace_char: Option<char>,
     /// Ctrl-w prefix: waiting for second key (w, j, k, h, l, c, =, _, |, etc.)

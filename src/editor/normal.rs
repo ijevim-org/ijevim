@@ -105,6 +105,20 @@ impl Editor {
                 return;
             }
             PendingOperator::AwaitingOperator { op, register } => {
+                // `g` starts a two-key motion (`dgg`). Only the operators
+                // that take a motion wait for it; `gg` itself is a complete
+                // motion and must pass through.
+                if let KeyCode::Char('g') = key {
+                    if matches!(op, Operator::Delete | Operator::Yank | Operator::Change)
+                        && !self.engine.operator_state.pending_g
+                    {
+                        self.engine.operator_state.pending_g = true;
+                        self.engine.operator_state.pending =
+                            PendingOperator::AwaitingOperator { op, register };
+                        self.needs_render = true;
+                        return;
+                    }
+                }
                 self.engine.operator_state.register = register;
                 let count = self.take_count();
                 self.handle_operator(op, key, count).await;
@@ -268,15 +282,8 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('S') => {
-                let _count = self.take_count();
-                self.delete_line('"');
-                let prev_mode = self.engine.state.mode;
-                self.engine.state.mode = Mode::Insert;
-                self.engine.plugin_manager.emit(PluginEvent::ModeChange {
-                    from: prev_mode,
-                    to: Mode::Insert,
-                });
-                self.on_buffer_modified();
+                let count = self.take_count();
+                self.change_lines('"', count);
             }
             KeyCode::Char('*') => {
                 let _count = self.take_count();
@@ -419,6 +426,13 @@ impl Editor {
                     register,
                 };
             }
+            KeyCode::Char('Y') => {
+                // `Y` yanks the whole line, like `yy`.
+                let register = self.engine.operator_state.register.take().unwrap_or('"');
+                let line = self.engine.state.cursor.line;
+                let count = self.take_count();
+                self.yank_lines_range(register, line, line + count.max(1) - 1);
+            }
             KeyCode::Char('d') => {
                 let register = self.engine.operator_state.register.take();
                 self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
@@ -469,12 +483,16 @@ impl Editor {
                     };
                 }
                 KeyCode::Char('G') => {
+                    // `G` targets the last line that holds text, not the
+                    // phantom line ropey reports after a trailing newline, and
+                    // it lands on the first non-blank like Vim.
+                    let last = self.engine.buffer.content_line_count();
                     let target = match self.engine.operator_state.count.take() {
-                        Some(c) => c.min(self.engine.buffer.line_count()).max(1),
-                        None => self.engine.buffer.line_count().max(1),
+                        Some(c) => c.clamp(1, last),
+                        None => last,
                     };
                     self.engine.state.cursor.line = target;
-                    self.engine.state.cursor.col = self.engine.buffer.line_max_col(target);
+                    self.engine.state.cursor.col = self.first_non_blank_col(target);
                     self.needs_render = true;
                 }
                 KeyCode::Char('%') => {
@@ -554,8 +572,9 @@ impl Editor {
                     };
                 }
                 KeyCode::Char('J') => {
+                    // `3J` joins three lines into one, i.e. two line breaks.
                     let count = self.take_count();
-                    for _ in 0..count {
+                    for _ in 0..count.saturating_sub(1).max(1) {
                         self.join_lines();
                     }
                     self.needs_render = true;
@@ -624,6 +643,23 @@ impl Editor {
             _ => '"',
         };
 
+        // `g` is a motion prefix: inside operator-pending it can only be
+        // `gg`, so wait for the second key instead of dropping the operator.
+        if self.engine.operator_state.pending_g {
+            self.engine.operator_state.pending_g = false;
+            if let KeyCode::Char('g') = key {
+                let line = self.engine.state.cursor.line;
+                match op {
+                    Operator::Delete => self.delete_lines_range(register, 1, line),
+                    Operator::Yank => self.yank_lines_range(register, 1, line),
+                    Operator::Change => self.change_line_range(register, 1, line),
+                    _ => {}
+                }
+            }
+            self.needs_render = true;
+            return;
+        }
+
         match op {
             Operator::Yank => match key {
                 KeyCode::Char('y') => {
@@ -652,26 +688,48 @@ impl Editor {
                     self.yank_cols(register, start, col);
                 }
                 KeyCode::Char('e') => {
-                    self.yank_word_end(register);
+                    self.yank_word_end(register, count, false);
+                }
+                KeyCode::Char('E') => {
+                    self.yank_word_end(register, count, true);
                 }
                 KeyCode::Char('b') => {
-                    let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    let start = self.word_back_start(line, col, false);
-                    self.yank_cols(register, start, col);
+                    let from = self.word_backward_target(count, false);
+                    let to = (
+                        self.engine.state.cursor.line,
+                        self.engine.state.cursor.col,
+                    );
+                    self.yank_span(register, from, to);
+                }
+                KeyCode::Char('B') => {
+                    let from = self.word_backward_target(count, true);
+                    let to = (
+                        self.engine.state.cursor.line,
+                        self.engine.state.cursor.col,
+                    );
+                    self.yank_span(register, from, to);
                 }
                 KeyCode::Char('j') => {
+                    // `j` fails on the last line, so the operator does nothing.
                     let line = self.engine.state.cursor.line;
-                    self.yank_lines_range(register, line, line + count.max(1));
+                    if line < self.engine.buffer.content_line_count() {
+                        self.yank_lines_range(register, line, line + count.max(1));
+                    }
                 }
                 KeyCode::Char('k') => {
                     let line = self.engine.state.cursor.line;
-                    let start = line.saturating_sub(count.max(1)).max(1);
-                    self.yank_lines_range(register, start, line);
+                    if line > 1 {
+                        let start = line.saturating_sub(count.max(1)).max(1);
+                        self.yank_lines_range(register, start, line);
+                    }
                 }
                 KeyCode::Char('G') => {
                     let line = self.engine.state.cursor.line;
-                    self.yank_lines_range(register, line, self.engine.buffer.line_count());
+                    self.yank_lines_range(
+                        register,
+                        line,
+                        self.engine.buffer.content_line_count(),
+                    );
                 }
                 KeyCode::Char('i') => {
                     self.engine.operator_state.pending = PendingOperator::AwaitingTextObject {
@@ -692,13 +750,8 @@ impl Editor {
             Operator::Delete => match key {
                 KeyCode::Char('d') => {
                     // `3dd` is a single undo step in Vim.
-                    let mut edits = Vec::new();
-                    for _ in 0..count.max(1) {
-                        if let Some(edit) = self.delete_line_edit(register) {
-                            edits.push(edit);
-                        }
-                    }
-                    self.push_undo_group(edits);
+                    let line = self.engine.state.cursor.line;
+                    self.delete_lines_range(register, line, line + count.max(1) - 1);
                 }
                 KeyCode::Char('w') => {
                     self.delete_word(register, count, false);
@@ -722,31 +775,48 @@ impl Editor {
                     self.delete_cols(register, start, col);
                 }
                 KeyCode::Char('e') => {
-                    let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    let (word, _, end) = self.engine.buffer.get_word_range(line, col);
-                    if !word.is_empty() {
-                        self.delete_cols(register, col, end);
-                    }
+                    self.delete_word_end(register, count, false);
+                }
+                KeyCode::Char('E') => {
+                    self.delete_word_end(register, count, true);
                 }
                 KeyCode::Char('b') => {
-                    let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    let start = self.word_back_start(line, col, false);
-                    self.delete_cols(register, start, col);
+                    let from = self.word_backward_target(count, false);
+                    let to = (
+                        self.engine.state.cursor.line,
+                        self.engine.state.cursor.col,
+                    );
+                    self.delete_span(register, from, to);
+                }
+                KeyCode::Char('B') => {
+                    let from = self.word_backward_target(count, true);
+                    let to = (
+                        self.engine.state.cursor.line,
+                        self.engine.state.cursor.col,
+                    );
+                    self.delete_span(register, from, to);
                 }
                 KeyCode::Char('j') => {
+                    // `j` fails on the last line, so the operator does nothing.
                     let line = self.engine.state.cursor.line;
-                    self.delete_lines_range(register, line, line + count.max(1));
+                    if line < self.engine.buffer.content_line_count() {
+                        self.delete_lines_range(register, line, line + count.max(1));
+                    }
                 }
                 KeyCode::Char('k') => {
                     let line = self.engine.state.cursor.line;
-                    let start = line.saturating_sub(count.max(1)).max(1);
-                    self.delete_lines_range(register, start, line);
+                    if line > 1 {
+                        let start = line.saturating_sub(count.max(1)).max(1);
+                        self.delete_lines_range(register, start, line);
+                    }
                 }
                 KeyCode::Char('G') => {
                     let line = self.engine.state.cursor.line;
-                    self.delete_lines_range(register, line, self.engine.buffer.line_count());
+                    self.delete_lines_range(
+                        register,
+                        line,
+                        self.engine.buffer.content_line_count(),
+                    );
                 }
                 KeyCode::Char('i') => {
                     self.engine.operator_state.pending = PendingOperator::AwaitingTextObject {
@@ -766,41 +836,40 @@ impl Editor {
             },
             Operator::Change => match key {
                 KeyCode::Char('c') => {
-                    let mut edits = Vec::new();
-                    for _ in 0..count.max(1) {
-                        if let Some(edit) = self.delete_line_edit(register) {
-                            edits.push(edit);
-                        }
-                    }
-                    self.push_undo_group(edits);
-                    let prev_mode = self.engine.state.mode;
-                    self.engine.state.mode = Mode::Insert;
-                    self.engine.plugin_manager.emit(PluginEvent::ModeChange {
-                        from: prev_mode,
-                        to: Mode::Insert,
-                    });
-                    self.engine.dot_last_action = Some(DotAction::Change {
-                        text: String::new(),
-                        line: self.engine.state.cursor.line,
-                        col: 0,
-                    });
-                    self.on_buffer_modified();
+                    // `cc` clears the line but keeps one empty line.
+                    self.change_lines(register, count);
                 }
                 KeyCode::Char('w') => {
-                    let line = self.engine.state.cursor.line;
-                    let (word, start, end) = self
-                        .engine
-                        .buffer
-                        .get_word_range(line, self.engine.state.cursor.col);
-                    if let Some(edit) = self.delete_cols_edit(register, start, end) {
-                        self.engine.undo_manager.push(edit);
-                        self.engine.dot_last_action = Some(DotAction::Change {
-                            text: word,
-                            line,
-                            col: start,
-                        });
-                        self.enter_insert_after_change();
-                    }
+                    self.change_word(register, count, false);
+                }
+                KeyCode::Char('W') => {
+                    self.change_word(register, count, true);
+                }
+                KeyCode::Char('e') => {
+                    self.delete_word_end(register, count, false);
+                    self.enter_insert_after_change();
+                }
+                KeyCode::Char('E') => {
+                    self.delete_word_end(register, count, true);
+                    self.enter_insert_after_change();
+                }
+                KeyCode::Char('b') => {
+                    let from = self.word_backward_target(count, false);
+                    let to = (
+                        self.engine.state.cursor.line,
+                        self.engine.state.cursor.col,
+                    );
+                    self.delete_span(register, from, to);
+                    self.enter_insert_after_change();
+                }
+                KeyCode::Char('B') => {
+                    let from = self.word_backward_target(count, true);
+                    let to = (
+                        self.engine.state.cursor.line,
+                        self.engine.state.cursor.col,
+                    );
+                    self.delete_span(register, from, to);
+                    self.enter_insert_after_change();
                 }
                 KeyCode::Char('$') => {
                     let line = self.engine.state.cursor.line;
@@ -820,28 +889,22 @@ impl Editor {
                     self.delete_cols(register, start, col);
                     self.enter_insert_after_change();
                 }
-                KeyCode::Char('e') => {
+                KeyCode::Char('j') => {
                     let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    let (word, _, end) = self.engine.buffer.get_word_range(line, col);
-                    if !word.is_empty() {
-                        self.delete_cols(register, col, end);
+                    if line < self.engine.buffer.content_line_count() {
+                        self.change_line_range(register, line, line + count.max(1));
                     }
-                    self.enter_insert_after_change();
                 }
-                KeyCode::Char('b') => {
+                KeyCode::Char('k') => {
                     let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    let start = self.word_back_start(line, col, false);
-                    self.delete_cols(register, start, col);
-                    self.enter_insert_after_change();
+                    if line > 1 {
+                        let start = line.saturating_sub(count.max(1)).max(1);
+                        self.change_line_range(register, start, line);
+                    }
                 }
-                KeyCode::Char('W') => {
+                KeyCode::Char('G') => {
                     let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    let (_, start, end) = self.engine.buffer.get_word_range_upper(line, col);
-                    self.delete_cols(register, start, end);
-                    self.enter_insert_after_change();
+                    self.change_line_range(register, line, self.engine.buffer.content_line_count());
                 }
                 KeyCode::Char('i') => {
                     self.engine.operator_state.pending = PendingOperator::AwaitingTextObject {
@@ -1090,13 +1153,13 @@ impl Editor {
         }
         self.push_undo_group(edits);
 
-        let line_count = self.engine.buffer.line_count().max(1);
-        self.engine.state.cursor.line = restore_line.min(line_count);
-        let max_col = self
-            .engine
-            .buffer
-            .line_max_col(self.engine.state.cursor.line);
-        self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
+        // Vim leaves the cursor on the first line of the deleted range,
+        // clamped to the new end of the buffer, at its first non-blank.
+        let line_count = self.engine.buffer.content_line_count().max(1);
+        let _ = restore_line;
+        self.engine.state.cursor.line = start.min(line_count);
+        self.engine.state.cursor.col =
+            self.first_non_blank_col(self.engine.state.cursor.line);
         self.needs_render = true;
     }
 
@@ -1122,45 +1185,186 @@ impl Editor {
             .unwrap_or(0)
     }
 
-    /// `yw` / `yW`: yank the same span `dw` would delete.
-    fn yank_word(&mut self, register: char, count: usize, big: bool) {
-        let line = self.engine.state.cursor.line;
-        let col = self.engine.state.cursor.col;
-        let content_len = self.line_content_len(line);
-
-        let mut target = col;
-        for _ in 0..count.max(1) {
-            match self.word_forward_target(line, target, big) {
-                Some(next) => target = next,
-                None => {
-                    target = content_len;
-                    break;
-                }
-            }
+    /// Resolve the target of a charwise word motion the way Vim does.
+    ///
+    /// A repeated `w` that lands in column 0 of a later line stops at the end
+    /// of the previous line: the line break is only part of the motion when
+    /// the target is further into the line.
+    fn exclusive_target(&self, from_line: usize, target: (usize, usize)) -> (usize, usize) {
+        let (line, col) = target;
+        if line > from_line && col == 0 {
+            (line - 1, self.line_content_len(line - 1))
+        } else {
+            target
         }
-        self.yank_cols(register, col, target);
     }
 
-    fn yank_word_end(&mut self, register: char) {
-        let line = self.engine.state.cursor.line;
-        let col = self.engine.state.cursor.col;
-        let line_str = self.engine.buffer.get_line(line);
-        let chars: Vec<char> = line_str.chars().collect();
-
-        let mut end = col;
-        while end < chars.len() && !chars[end].is_whitespace() {
-            end += 1;
+    /// Target of `{count}w` / `{count}e`, honoring the count across lines.
+    fn word_motion_target(&self, count: usize, big: bool, to_word_end: bool) -> (usize, usize) {
+        let (mut line, mut col) = (
+            self.engine.state.cursor.line,
+            self.engine.state.cursor.col,
+        );
+        for _ in 0..count.max(1) {
+            let next = if to_word_end {
+                self.word_end_pos(line, col, big)
+            } else {
+                self.word_forward_pos(line, col, big)
+            };
+            if next == (line, col) {
+                break;
+            }
+            line = next.0;
+            col = next.1;
         }
+        (line, col)
+    }
 
-        let word: String = chars[col..end].iter().collect();
-        self.engine.register.set(register, &word);
+    /// Target of `{count}b` / `{count}B`, crossing lines.
+    fn word_backward_target(&self, count: usize, big: bool) -> (usize, usize) {
+        let (mut line, mut col) = (
+            self.engine.state.cursor.line,
+            self.engine.state.cursor.col,
+        );
+        for _ in 0..count.max(1) {
+            let next = self.word_backward_pos(line, col, big);
+            if next == (line, col) {
+                break;
+            }
+            line = next.0;
+            col = next.1;
+        }
+        (line, col)
+    }
+
+    /// `cc` / `S`: clear `count` lines and leave a single empty line behind.
+    fn change_lines(&mut self, register: char, count: usize) {
+        let start = self.engine.state.cursor.line;
+        let mut edits = Vec::new();
+        for _ in 1..count.max(1) {
+            if let Some(edit) = self.delete_line_edit(register) {
+                edits.push(edit);
+            }
+        }
+        let len = self.line_content_len(self.engine.state.cursor.line);
+        if let Some(edit) = self.delete_cols_edit(register, 0, len) {
+            edits.push(edit);
+        }
+        self.push_undo_group(edits);
+        self.engine.state.cursor.line = start.min(self.engine.buffer.line_count());
+        self.engine.state.cursor.col = 0;
+        self.enter_insert_after_change();
+    }
+
+    /// `cj` / `ck` / `cG`: delete whole lines, keep one empty line, insert.
+    fn change_line_range(&mut self, register: char, first: usize, last: usize) {
+        let first = first.max(1);
+        let last = last.max(first).min(self.engine.buffer.content_line_count());
+        self.engine.state.cursor.line = first;
+        let mut edits = Vec::new();
+        for _ in first..=last {
+            if let Some(edit) = self.delete_line_edit(register) {
+                edits.push(edit);
+            }
+        }
+        // Vim leaves one empty line where the changed lines were.
+        if self.engine.buffer.to_string() != "\n" {
+            self.engine.buffer.insert(first, 0, "\n");
+            edits.push(Edit {
+                edit_type: EditType::InsertLine {
+                    line: first,
+                    text: String::new(),
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: self.engine.state.cursor,
+                modification_count: self.engine.buffer.modification_count(),
+            });
+        }
+        self.push_undo_group(edits);
+        self.engine.state.cursor.line = first.min(self.engine.buffer.line_count());
+        self.engine.state.cursor.col = 0;
+        self.enter_insert_after_change();
+    }
+
+    /// Delete an arbitrary charwise span, joining lines when it crosses one.
+    fn delete_span(&mut self, register: char, from: (usize, usize), to: (usize, usize)) {
+        if let Some(edit) = self.delete_span_edit(register, from, to) {
+            self.engine.undo_manager.push(edit);
+        }
+    }
+
+    /// Core of [`Self::delete_span`] that leaves the undo entry to the caller.
+    fn delete_span_edit(
+        &mut self,
+        register: char,
+        from: (usize, usize),
+        to: (usize, usize),
+    ) -> Option<Edit> {
+        if from >= to {
+            return None;
+        }
+        let content = self
+            .engine
+            .buffer
+            .get_char_range(from.0, from.1, to.0, to.1);
+        if content.is_empty() {
+            return None;
+        }
+        let mod_count = self.engine.buffer.modification_count();
+        let start_char = self.engine.buffer.line_to_char(from.0.saturating_sub(1)) + from.1;
+        let end_char = start_char + content.chars().count();
+        self.engine.buffer.remove_range(start_char, end_char);
+        self.engine.register.set(register, &content);
+        self.engine.state.cursor.line = from.0;
+        self.engine.state.cursor.col = from.1.min(self.engine.buffer.line_max_col(from.0));
+        self.on_buffer_modified();
+        Some(Edit {
+            edit_type: EditType::Delete {
+                line: from.0,
+                col: from.1,
+                text: content,
+            },
+            cursor_before: self.engine.state.cursor,
+            cursor_after: self.engine.state.cursor,
+            modification_count: mod_count,
+        })
+    }
+
+    /// Yank an arbitrary charwise span.
+    fn yank_span(&mut self, register: char, from: (usize, usize), to: (usize, usize)) {
+        if from >= to {
+            return;
+        }
+        let content = self
+            .engine
+            .buffer
+            .get_char_range(from.0, from.1, to.0, to.1);
+        if content.is_empty() {
+            return;
+        }
+        self.engine.register.set(register, &content);
         self.needs_render = true;
     }
 
-    fn delete_line(&mut self, register: char) {
-        if let Some(edit) = self.delete_line_edit(register) {
-            self.engine.undo_manager.push(edit);
-        }
+    /// `yw` / `yW`: yank the same span `dw` would delete.
+    fn yank_word(&mut self, register: char, count: usize, big: bool) {
+        let from = (
+            self.engine.state.cursor.line,
+            self.engine.state.cursor.col,
+        );
+        let target = self.word_motion_target(count, big, false);
+        let target = self.exclusive_target(from.0, target);
+        self.yank_span(register, from, target);
+    }
+
+    /// `ye` / `yE`: yank through the end of the word, inclusive.
+    fn yank_word_end(&mut self, register: char, count: usize, big: bool) {
+        let from = (
+            self.engine.state.cursor.line,
+            self.engine.state.cursor.col,
+        );
+        let (line, col) = self.word_motion_target(count, big, true);
+        self.yank_span(register, from, (line, col + 1));
     }
 
     /// Delete the current line and return the undo entry without pushing it.
@@ -1223,21 +1427,42 @@ impl Editor {
     /// would stay glued to whatever follows. When no further word exists the
     /// delete runs to the end of the line.
     fn delete_word(&mut self, register: char, count: usize, big: bool) {
+        let from = (
+            self.engine.state.cursor.line,
+            self.engine.state.cursor.col,
+        );
+        let target = self.word_motion_target(count, big, false);
+        let target = self.exclusive_target(from.0, target);
+        self.delete_span(register, from, target);
+    }
+
+    /// `de` / `dE`: delete through the end of the word, inclusive.
+    fn delete_word_end(&mut self, register: char, count: usize, big: bool) {
+        let from = (
+            self.engine.state.cursor.line,
+            self.engine.state.cursor.col,
+        );
+        let (line, col) = self.word_motion_target(count, big, true);
+        self.delete_span(register, from, (line, col + 1));
+    }
+
+    /// `cw` / `cW`: change to the end of the word, or behave like `dw` when the
+    /// cursor sits on blanks (Vim's documented special case).
+    fn change_word(&mut self, register: char, count: usize, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        let content_len = self.line_content_len(line);
-
-        let mut target = col;
-        for _ in 0..count.max(1) {
-            match self.word_forward_target(line, target, big) {
-                Some(next) => target = next,
-                None => {
-                    target = content_len;
-                    break;
-                }
-            }
+        let on_blank = self
+            .engine
+            .buffer
+            .line_chars(line)
+            .get(col)
+            .is_none_or(|c| c.is_whitespace());
+        if on_blank {
+            self.delete_word(register, count, big);
+        } else {
+            self.delete_word_end(register, count, big);
         }
-        self.delete_cols(register, col, target);
+        self.enter_insert_after_change();
     }
 
     async fn paste(&mut self, before: bool) {
@@ -1252,72 +1477,36 @@ impl Editor {
 
         let mod_count = self.engine.buffer.modification_count();
         let cursor_before = self.engine.state.cursor;
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
 
-        if content.contains('\n') {
-            let lines: Vec<&str> = content.lines().collect();
-            for (i, line) in lines.iter().enumerate() {
-                if i == 0 {
-                    if before {
-                        self.engine
-                            .buffer
-                            .insert(self.engine.state.cursor.line, 0, line);
-                        self.engine.buffer.insert(
-                            self.engine.state.cursor.line,
-                            line.chars().count(),
-                            "\n",
-                        );
-                    } else {
-                        self.engine.buffer.insert(
-                            self.engine.state.cursor.line,
-                            self.engine.state.cursor.col,
-                            line,
-                        );
-                        self.engine.buffer.insert(
-                            self.engine.state.cursor.line,
-                            self.engine.state.cursor.col + line.chars().count(),
-                            "\n",
-                        );
-                    }
-                } else {
-                    let insert_line = self.engine.state.cursor.line + i;
-                    self.engine.buffer.insert(insert_line, 0, line);
-                    self.engine
-                        .buffer
-                        .insert(insert_line, line.chars().count(), "\n");
-                }
-            }
-            if before {
-                self.engine.state.cursor.line += lines.len() - 1;
-                self.engine.state.cursor.col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
-            } else {
-                self.engine.state.cursor.line += lines.len() - 1;
-                let last_line = lines.last().unwrap();
-                self.engine.state.cursor.col = last_line.chars().count();
-            }
+        // A trailing newline marks a linewise register. Pasting it inserts
+        // whole lines above or below the cursor line; Vim never drops it at
+        // the cursor column.
+        let (edit_line, edit_col) = if content.ends_with('\n') {
+            let insert_at = if before { line } else { line + 1 };
+            self.engine.buffer.insert(insert_at, 0, &content);
+            self.engine.state.cursor.line = insert_at.min(self.engine.buffer.line_count());
+            self.engine.state.cursor.col =
+                self.first_non_blank_col(self.engine.state.cursor.line);
+            (insert_at, 0)
         } else {
-            if before {
-                self.engine.buffer.insert(
-                    self.engine.state.cursor.line,
-                    self.engine.state.cursor.col,
-                    &content,
-                );
+            let at = if before {
+                col
             } else {
-                self.engine.buffer.insert(
-                    self.engine.state.cursor.line,
-                    self.engine.state.cursor.col + 1,
-                    &content,
-                );
-                self.engine.state.cursor.col += 1;
-            }
-            if !before {
-                self.engine.state.cursor.col += content.chars().count();
-            }
-        }
+                (col + 1).min(self.line_content_len(line))
+            };
+            self.engine.buffer.insert(line, at, &content);
+            let pasted = content.chars().count();
+            self.engine.state.cursor.line = line;
+            self.engine.state.cursor.col = at + pasted.saturating_sub(1);
+            (line, at)
+        };
 
         self.engine.undo_manager.push(Edit {
             edit_type: EditType::Insert {
-                line: cursor_before.line,
-                col: cursor_before.col,
+                line: edit_line,
+                col: edit_col,
                 text: content,
             },
             cursor_before,
@@ -1526,7 +1715,8 @@ impl Editor {
 
         if needs_space {
             self.engine.buffer.insert(line, join_pos, " ");
-            self.engine.state.cursor.col = join_pos + 1;
+            // Vim leaves the cursor on the space that replaced the newline.
+            self.engine.state.cursor.col = join_pos;
             // The separating space is part of the join: undo must remove it
             // together with restoring the newline.
             self.push_undo_group(vec![

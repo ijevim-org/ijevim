@@ -155,72 +155,122 @@ impl Editor {
     /// there is none.
     ///
     /// Vim's `w` skips the rest of the current word *and* the blanks that
-    /// follow it; stopping at the first blank leaves the cursor in the gap
-    /// (which then breaks `db`, `cw`, ...).
-    pub(crate) fn word_forward_target(&self, line: usize, col: usize, big: bool) -> Option<usize> {
-        let chars = self.engine.buffer.line_chars(line);
-        let content_len = self.engine.buffer.line_content_len(line);
-        let is_word = |c: char| {
-            if big {
-                !c.is_whitespace()
-            } else {
-                c.is_alphanumeric() || c == '_'
-            }
-        };
+    /// follow it, crossing line breaks. An empty line counts as a word stop,
+    /// which is why `w` lands on column 0 of a blank line instead of skipping
+    /// it.
+    pub(crate) fn word_forward_pos(&self, line: usize, col: usize, big: bool) -> (usize, usize) {
+        let last = self.engine.buffer.content_line_count();
+        let mut l = line.clamp(1, last);
+        let mut chars = self.engine.buffer.line_chars(l);
+        let mut len = content_len(&chars);
+        let mut c = col.min(len);
 
-        let mut i = col.min(content_len);
-        if i < content_len && !is_word(chars[i]) && !chars[i].is_whitespace() {
-            // Sitting on punctuation: skip that run, then the blanks.
-            while i < content_len && !is_word(chars[i]) && !chars[i].is_whitespace() {
-                i += 1;
-            }
-        } else {
-            while i < content_len && is_word(chars[i]) {
-                i += 1;
+        if c < len {
+            let class = word_class(chars[c], big);
+            if class != WordClass::Blank {
+                while c < len && word_class(chars[c], big) == class {
+                    c += 1;
+                }
             }
         }
-        while i < content_len && chars[i].is_whitespace() {
-            i += 1;
-        }
-        if i < content_len {
-            Some(i)
-        } else {
-            None
+
+        loop {
+            while c < len && chars[c].is_whitespace() {
+                c += 1;
+            }
+            if c < len {
+                return (l, c);
+            }
+            if l >= last {
+                return (l, len.saturating_sub(1));
+            }
+            l += 1;
+            chars = self.engine.buffer.line_chars(l);
+            len = content_len(&chars);
+            c = 0;
+            if len == 0 {
+                // An empty line is a word boundary of its own.
+                return (l, 0);
+            }
         }
     }
 
-    pub(crate) fn word_forward_col(&self, line: usize, col: usize, big: bool) -> usize {
-        match self.word_forward_target(line, col, big) {
-            Some(target) => target,
-            None => self.engine.buffer.line_max_col(line),
+    /// Start of the word before the cursor, crossing line breaks.
+    pub(crate) fn word_backward_pos(&self, line: usize, col: usize, big: bool) -> (usize, usize) {
+        let mut l = line.max(1);
+        let mut chars = self.engine.buffer.line_chars(l);
+        let mut len = content_len(&chars);
+        let mut c = col.min(len.saturating_sub(1));
+
+        loop {
+            if c > 0 {
+                c -= 1;
+            } else if l > 1 {
+                l -= 1;
+                chars = self.engine.buffer.line_chars(l);
+                len = content_len(&chars);
+                if len == 0 {
+                    // Blank lines are skipped by `b`.
+                    continue;
+                }
+                c = len - 1;
+            } else {
+                return (1, 0);
+            }
+            if !chars[c].is_whitespace() {
+                break;
+            }
         }
+
+        let class = word_class(chars[c], big);
+        while c > 0 && word_class(chars[c - 1], big) == class {
+            c -= 1;
+        }
+        (l, c)
     }
 
-    /// First column of the word before the one under the cursor.
-    ///
-    /// Used by `b`, `db`, `cb`: the cursor must land on the start of the
-    /// preceding word, skipping the blanks in between.
-    pub(crate) fn word_back_start(&self, line: usize, col: usize, big: bool) -> usize {
-        let chars = self.engine.buffer.line_chars(line);
-        if col == 0 || chars.is_empty() {
-            return 0;
-        }
-        let is_word = |c: char| {
-            if big {
-                !c.is_whitespace()
-            } else {
-                c.is_alphanumeric() || c == '_'
-            }
-        };
+    /// Last column of the next word end, crossing line breaks.
+    pub(crate) fn word_end_pos(&self, line: usize, col: usize, big: bool) -> (usize, usize) {
+        let last = self.engine.buffer.content_line_count();
+        let mut l = line.clamp(1, last);
+        let mut chars = self.engine.buffer.line_chars(l);
+        let mut len = content_len(&chars);
+        let mut c = col;
 
-        let mut i = col.saturating_sub(1).min(chars.len() - 1);
-        while i > 0 && !is_word(chars[i]) {
-            i -= 1;
+        // `e` always moves at least one character forward.
+        if c + 1 < len {
+            c += 1;
+        } else if l < last {
+            l += 1;
+            chars = self.engine.buffer.line_chars(l);
+            len = content_len(&chars);
+            c = 0;
+        } else {
+            return (l, len.saturating_sub(1));
         }
-        while i > 0 && is_word(chars[i - 1]) {
-            i -= 1;
+
+        loop {
+            if c < len && !chars[c].is_whitespace() {
+                break;
+            }
+            if c + 1 < len {
+                c += 1;
+                continue;
+            }
+            if l >= last {
+                return (l, len.saturating_sub(1));
+            }
+            l += 1;
+            chars = self.engine.buffer.line_chars(l);
+            len = content_len(&chars);
+            c = 0;
         }
-        i
+
+        let class = word_class(chars[c], big);
+        while c + 1 < len && word_class(chars[c + 1], big) == class {
+            c += 1;
+        }
+        (l, c)
     }
 
     pub(crate) fn move_word_forward(&mut self) {
@@ -235,7 +285,9 @@ impl Editor {
     fn move_word_forward_impl(&mut self, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        self.engine.state.cursor.col = self.word_forward_col(line, col, big);
+        let (l, c) = self.word_forward_pos(line, col, big);
+        self.engine.state.cursor.line = l;
+        self.engine.state.cursor.col = c;
         self.needs_render = true;
     }
 
@@ -251,33 +303,10 @@ impl Editor {
     fn move_word_backward_impl(&mut self, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        self.engine.state.cursor.col = self.word_back_start(line, col, big);
+        let (l, c) = self.word_backward_pos(line, col, big);
+        self.engine.state.cursor.line = l;
+        self.engine.state.cursor.col = c;
         self.needs_render = true;
-    }
-
-    /// Last column of the word the cursor is on (or of the next one).
-    pub(crate) fn word_end_col(&self, line: usize, col: usize, big: bool) -> usize {
-        let chars = self.engine.buffer.line_chars(line);
-        let content_len = self.engine.buffer.line_content_len(line);
-        if content_len == 0 {
-            return 0;
-        }
-        let is_word = |c: char| {
-            if big {
-                !c.is_whitespace()
-            } else {
-                c.is_alphanumeric() || c == '_'
-            }
-        };
-
-        let mut i = col.min(content_len.saturating_sub(1));
-        while i < content_len && !is_word(chars[i]) {
-            i += 1;
-        }
-        while i + 1 < content_len && is_word(chars[i + 1]) {
-            i += 1;
-        }
-        i.min(content_len - 1)
     }
 
     pub(crate) fn move_word_end(&mut self) {
@@ -292,7 +321,9 @@ impl Editor {
     fn move_word_end_impl(&mut self, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
-        self.engine.state.cursor.col = self.word_end_col(line, col, big);
+        let (l, c) = self.word_end_pos(line, col, big);
+        self.engine.state.cursor.line = l;
+        self.engine.state.cursor.col = c;
         self.needs_render = true;
     }
 
@@ -450,5 +481,33 @@ impl Editor {
                 break;
             }
         }
+    }
+}
+
+/// Vim's character classes for word motions: keyword characters, runs of
+/// other non-blank characters, and blanks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordClass {
+    Blank,
+    Keyword,
+    Punct,
+}
+
+fn word_class(c: char, big: bool) -> WordClass {
+    if c.is_whitespace() {
+        WordClass::Blank
+    } else if big || c.is_alphanumeric() || c == '_' {
+        // `W`/`B`/`E` treat every non-blank as one class.
+        WordClass::Keyword
+    } else {
+        WordClass::Punct
+    }
+}
+
+/// Line length without the trailing newline that ropey keeps.
+fn content_len(chars: &[char]) -> usize {
+    match chars.last() {
+        Some('\n') => chars.len() - 1,
+        _ => chars.len(),
     }
 }

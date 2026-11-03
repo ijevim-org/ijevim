@@ -45,6 +45,20 @@ impl TextBuffer {
         self.doc.len_lines()
     }
 
+    /// Number of lines that hold text.
+    ///
+    /// Ropey reports a phantom empty line after a trailing newline, so a file
+    /// ending in `\n` looks one line longer than it is. Motions like `G` must
+    /// stop on the last real line instead of that phantom.
+    pub fn content_line_count(&self) -> usize {
+        let count = self.line_count();
+        if count > 1 && self.line_content_len(count) == 0 {
+            count - 1
+        } else {
+            count.max(1)
+        }
+    }
+
     pub fn get_line(&self, line_number: usize) -> String {
         if line_number < 1 || line_number > self.line_count() {
             return String::new();
@@ -412,13 +426,12 @@ impl TextBuffer {
         }
 
         let mut result = String::new();
-        result.push_str(
-            &self
-                .get_line(start_line)
-                .chars()
-                .skip(start_col)
-                .collect::<String>(),
-        );
+        // `get_line` keeps the line's own newline; strip it before adding the
+        // separator, otherwise every multi-line range gains a stray newline.
+        let first = self.get_line(start_line);
+        let first = first.strip_suffix('\n').unwrap_or(&first);
+        let first = first.strip_suffix('\r').unwrap_or(first);
+        result.push_str(&first.chars().skip(start_col).collect::<String>());
         result.push('\n');
         for line_num in (start_line + 1)..end_line {
             result.push_str(&self.get_line(line_num));
