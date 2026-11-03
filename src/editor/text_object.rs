@@ -3,61 +3,68 @@ use crate::undo::{Edit, EditType};
 use crossterm::event::KeyCode;
 
 impl Editor {
-    pub(crate) fn indent_lines(&mut self, register: char, indent: bool) {
-        let line = self.engine.state.cursor.line;
-        let content = self.engine.buffer.get_line(line);
-        let _ = register;
-        let mod_count = self.engine.buffer.modification_count();
+    /// Indent or unindent `first..=last`, one undo group.
+    ///
+    /// Vim moves the cursor to the first non-blank afterwards, which is what
+    /// `>>` on a tab-indented line relies on.
+    pub(crate) fn indent_lines(&mut self, first: usize, last: usize, indent: bool) {
+        let first = first.max(1);
+        let last = last.max(first).min(self.engine.buffer.content_line_count());
+        let sw = self.engine.state.shiftwidth.max(1);
+        let indent_str = if self.engine.state.expandtab {
+            " ".repeat(sw)
+        } else {
+            "\t".to_string()
+        };
 
-        if indent {
-            let indent_str = if self.engine.state.expandtab {
-                " ".repeat(self.engine.state.shiftwidth)
-            } else {
+        let mut edits = Vec::new();
+        for line in first..=last {
+            let content = self.engine.buffer.get_line(line);
+            let mod_count = self.engine.buffer.modification_count();
+
+            if indent {
+                self.engine.buffer.insert(line, 0, &indent_str);
+                edits.push(Edit {
+                    edit_type: EditType::Insert {
+                        line,
+                        col: 0,
+                        text: indent_str.clone(),
+                    },
+                    cursor_before: self.engine.state.cursor,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                });
+                continue;
+            }
+
+            // Unindent one shiftwidth: a leading tab, or up to `sw` spaces.
+            let removed = if content.starts_with('\t') {
                 "\t".to_string()
+            } else {
+                let count = content.chars().take(sw).take_while(|c| *c == ' ').count();
+                " ".repeat(count)
             };
-            self.engine.buffer.insert(line, 0, &indent_str);
-            self.engine.undo_manager.push(Edit {
-                edit_type: EditType::Insert {
+            if removed.is_empty() {
+                continue;
+            }
+            for _ in 0..removed.chars().count() {
+                self.engine.buffer.delete(line, 0);
+            }
+            edits.push(Edit {
+                edit_type: EditType::Delete {
                     line,
                     col: 0,
-                    text: indent_str,
+                    text: removed,
                 },
                 cursor_before: self.engine.state.cursor,
                 cursor_after: self.engine.state.cursor,
                 modification_count: mod_count,
             });
-        } else {
-            // Unindent: try to remove `shiftwidth` spaces or one tab.
-            let sw = self.engine.state.shiftwidth;
-            if content.starts_with('\t') {
-                self.engine.buffer.delete(line, 0);
-                self.engine.undo_manager.push(Edit {
-                    edit_type: EditType::Delete {
-                        line,
-                        col: 0,
-                        text: "\t".to_string(),
-                    },
-                    cursor_before: self.engine.state.cursor,
-                    cursor_after: self.engine.state.cursor,
-                    modification_count: mod_count,
-                });
-            } else if content.starts_with(&" ".repeat(sw)) {
-                for _ in 0..sw {
-                    self.engine.buffer.delete(line, 0);
-                }
-                self.engine.undo_manager.push(Edit {
-                    edit_type: EditType::Delete {
-                        line,
-                        col: 0,
-                        text: " ".repeat(sw),
-                    },
-                    cursor_before: self.engine.state.cursor,
-                    cursor_after: self.engine.state.cursor,
-                    modification_count: mod_count,
-                });
-            }
         }
 
+        self.push_undo_group(edits);
+        let line = self.engine.state.cursor.line;
+        self.engine.state.cursor.col = self.first_non_blank_col(line);
         self.engine.dot_last_action = Some(crate::types::DotAction::Indent { unindent: !indent });
         self.needs_render = true;
     }

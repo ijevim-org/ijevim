@@ -189,17 +189,37 @@ impl Editor {
             }
         }
 
+        // Vim aborts `{count}r` when the line has fewer characters left:
+        // `5r!` on a two-character line changes nothing at all.
+        let available = self.engine.buffer.line_content_len(line) - self.engine.state.cursor.col;
+        if count > available {
+            self.engine.operator_state.replace_char = None;
+            self.transition_mode(Mode::Normal);
+            self.needs_render = true;
+            return;
+        }
+
+        // `3r!` cannot extend a line: only the characters that exist are
+        // replaced, so the line length stays the same.
+        let replaced = old_text.chars().count();
+        if replaced == 0 {
+            self.engine.operator_state.replace_char = None;
+            self.transition_mode(Mode::Normal);
+            self.needs_render = true;
+            return;
+        }
+
         // Perform the replace — delete old, insert new.
-        let start_char =
-            self.engine.buffer.line_to_char(line.saturating_sub(1)) + self.engine.state.cursor.col;
-        let end_char = start_char + old_text.chars().count();
+        let start_col = self.engine.state.cursor.col;
+        let start_char = self.engine.buffer.line_to_char(line.saturating_sub(1)) + start_col;
+        let end_char = start_char + replaced;
         self.engine.buffer.remove_range(start_char, end_char);
-        let new_text: String = (0..count).map(|_| c).collect();
-        self.engine.buffer.insert(
-            self.engine.state.cursor.line,
-            self.engine.state.cursor.col,
-            &new_text,
-        );
+        let new_text: String = (0..replaced).map(|_| c).collect();
+        self.engine
+            .buffer
+            .insert(self.engine.state.cursor.line, start_col, &new_text);
+        // Vim leaves the cursor on the last replaced character.
+        self.engine.state.cursor.col = start_col + replaced - 1;
 
         // Push undo entry.
         let mod_count = self.engine.buffer.modification_count();

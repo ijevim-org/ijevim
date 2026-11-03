@@ -634,6 +634,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn content_line_count_ignores_the_phantom_trailing_line() {
+        let mut buf = TextBuffer::with_text("one\ntwo\n");
+        assert_eq!(
+            buf.line_count(),
+            3,
+            "ropey counts the line after the last \\n"
+        );
+        assert_eq!(buf.content_line_count(), 2);
+
+        buf = TextBuffer::with_text("one\ntwo");
+        assert_eq!(buf.content_line_count(), 2);
+
+        // A real (explicit) blank line still counts.
+        buf = TextBuffer::with_text("one\n\n");
+        assert_eq!(buf.content_line_count(), 2);
+    }
+
+    #[test]
+    fn get_char_range_does_not_double_the_line_break() {
+        let buf = TextBuffer::with_text("foo bar\nqux quux\n");
+        assert_eq!(buf.get_char_range(1, 0, 2, 4), "foo bar\nqux ");
+        assert_eq!(buf.get_char_range(1, 4, 2, 0), "bar\n");
+        assert_eq!(buf.get_char_range(1, 0, 1, 3), "foo");
+    }
+
+    #[test]
+    fn delete_range_over_lines_keeps_the_count_right() {
+        let mut buf = TextBuffer::with_text("foo bar\nqux quux\n");
+        let removed = buf.delete_range(1, 0, 2, 4);
+        assert_eq!(removed, "foo bar\nqux ");
+        assert_eq!(buf.to_string(), "quux\n");
+    }
+
+    #[test]
     fn test_insert_char() {
         let mut buf = TextBuffer::new();
         buf.insert_char(1, 0, 'a');

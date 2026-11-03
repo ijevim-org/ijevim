@@ -459,9 +459,10 @@ impl Editor {
     /// translated to the `regex` crate's (`$0`, `$1`..`$9`).
     fn handle_substitute(&mut self, cmd: &str) {
         let Some(idx) = cmd.find("s/") else {
-            self.engine
-                .state
-                .push_message(MessageLevel::Warning, "Invalid substitute command".to_string());
+            self.engine.state.push_message(
+                MessageLevel::Warning,
+                "Invalid substitute command".to_string(),
+            );
             return;
         };
         let range_spec = &cmd[..idx];
