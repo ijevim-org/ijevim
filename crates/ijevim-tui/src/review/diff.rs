@@ -14,12 +14,18 @@ use crate::review::state::{
 /// Returns `Some(ReviewState)` on success, `None` if not in a git
 /// repository or if `git diff` fails. The caller should fall back to
 /// mock data when this returns `None`.
-pub fn try_get_review_state(args: &ReviewArgs) -> Option<ReviewState> {
-    let project_root = ijevim_core::git::find_root()?;
-    let diff_output = run_git_diff(args).ok()?;
+/// Build the review state from the real `git diff`.
+///
+/// Returns the reason on failure instead of an `Option`, so the caller can
+/// report it. A silent fallback to fabricated data makes the review screen
+/// look like it is showing the user's actual changes.
+pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
+    let project_root =
+        ijevim_core::git::find_root().ok_or_else(|| "not inside a git repository".to_string())?;
+    let diff_output = run_git_diff(args)?;
     let files = parse_unified_diff(&diff_output);
 
-    Some(ReviewState {
+    Ok(ReviewState {
         args: args.clone(),
         files,
         selected_file: 0,
@@ -54,7 +60,8 @@ fn run_git_diff(args: &ReviewArgs) -> Result<String, String> {
 fn diff_cmd(args: &[&str]) -> Result<String, String> {
     let mut all = vec!["diff"];
     all.extend_from_slice(args);
-    let output = ijevim_core::git::raw(&all).map_err(|e| format!("Failed to run git diff: {}", e))?;
+    let output =
+        ijevim_core::git::raw(&all).map_err(|e| format!("Failed to run git diff: {}", e))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {

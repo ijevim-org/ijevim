@@ -4,11 +4,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 impl Editor {
     pub(crate) async fn handle_command(&mut self, key: KeyCode, modifiers: KeyModifiers) {
-        if self.engine.state.has_confirmation() {
-            self.handle_confirmation(key).await;
-            return;
-        }
-
         match key {
             KeyCode::Enter => {
                 let cmd = self.engine.state.command_buffer.trim().to_string();
@@ -96,24 +91,29 @@ impl Editor {
                         self.needs_render = true;
                     }
                     "messages" => {
-                        let history: Vec<_> =
-                            self.engine.state.message_history.iter().cloned().collect();
-                        if history.is_empty() {
+                        if self.engine.state.message_history.is_empty() {
                             self.engine
                                 .state
                                 .push_message(MessageLevel::Info, "No messages".to_string());
                         } else {
-                            // Display all messages in history
-                            for msg in history {
-                                let prefix = match msg.level {
-                                    MessageLevel::Error => "[ERROR]",
-                                    MessageLevel::Warning => "[WARN]",
-                                    MessageLevel::Info => "[INFO]",
-                                };
-                                self.engine
-                                    .state
-                                    .push_message(msg.level, format!("{} {}", prefix, msg.text));
-                            }
+                            // Read the history without re-inserting it, otherwise
+                            // every `:messages` duplicates the whole log.
+                            let text = self
+                                .engine
+                                .state
+                                .message_history
+                                .iter()
+                                .map(|msg| {
+                                    let prefix = match msg.level {
+                                        MessageLevel::Error => "[ERROR]",
+                                        MessageLevel::Warning => "[WARN]",
+                                        MessageLevel::Info => "[INFO]",
+                                    };
+                                    format!("{} {}", prefix, msg.text)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" | ");
+                            self.engine.state.last_message = Some(text);
                         }
                     }
                     cmd if cmd.starts_with("e ") || cmd == "e." => {
@@ -179,7 +179,7 @@ impl Editor {
                                     self.reload_file_after_checkout();
                                 }
                             }
-                        } else if cmd.starts_with("%s/") || cmd.starts_with("s/") {
+                        } else if Self::is_substitute_command(cmd) {
                             self.handle_substitute(cmd);
                         } else {
                             // Split cmd into command name and args
@@ -438,35 +438,56 @@ impl Editor {
         }
     }
 
-    /// Handle `:s/pattern/replacement/[g]` and `:%s/pattern/replacement/[g]`.
+    /// True for `:s/...`, `:%s/...`, `:3s/...`, `:1,5s/...` and `:$s/...`.
+    fn is_substitute_command(cmd: &str) -> bool {
+        let Some(idx) = cmd.find("s/") else {
+            return false;
+        };
+        let spec = &cmd[..idx];
+        match spec.chars().next() {
+            // No range at all: `:s/...`.
+            None => true,
+            // A range-looking prefix is routed here so a malformed one is
+            // reported as an invalid range rather than an unknown command.
+            Some(c) => c.is_ascii_digit() || c == '%' || c == '.' || c == '$',
+        }
+    }
+
+    /// Handle `:[range]s/pattern/replacement/[g]`.
+    ///
+    /// The replacement follows Vim's syntax (`&`, `\1`..`\9`) and is
+    /// translated to the `regex` crate's (`$0`, `$1`..`$9`).
     fn handle_substitute(&mut self, cmd: &str) {
-        // Parse the delimiter (always `/` in our implementation).
-        let (range, rest) = if let Some(rest) = cmd.strip_prefix("%s/") {
-            ("%", rest)
-        } else if let Some(rest) = cmd.strip_prefix("s/") {
-            (".", rest)
-        } else {
+        let Some(idx) = cmd.find("s/") else {
             self.engine.state.push_message(
                 MessageLevel::Warning,
                 "Invalid substitute command".to_string(),
             );
             return;
         };
+        let range_spec = &cmd[..idx];
+        let rest = &cmd[idx + 2..];
 
         // Split into pattern / replacement / flags.
-        let parts: Vec<&str> = rest.splitn(3, '/').collect();
-        if parts.len() < 2 {
+        let mut parts = rest.splitn(3, '/');
+        let pattern_str = parts.next().unwrap_or("");
+        let Some(replacement) = parts.next() else {
             self.engine.state.push_message(
                 MessageLevel::Warning,
                 "Invalid substitute syntax".to_string(),
             );
             return;
-        }
-        let pattern_str = parts[0];
-        let replacement = parts[1];
-        let flags = parts.get(2).copied().unwrap_or("");
+        };
+        let flags = parts.next().unwrap_or("");
 
-        // Compile regex pattern.
+        if pattern_str.is_empty() {
+            self.engine.state.push_message(
+                MessageLevel::Warning,
+                "Empty substitute pattern".to_string(),
+            );
+            return;
+        }
+
         let re = match regex::Regex::new(pattern_str) {
             Ok(re) => re,
             Err(e) => {
@@ -476,57 +497,70 @@ impl Editor {
                 return;
             }
         };
+        let replacement = translate_replacement(replacement);
 
         let global = flags.contains('g');
         let line_count = self.engine.buffer.line_count();
 
-        // Determine line range.
-        let (start_line, end_line) = if range == "%" {
-            (1, line_count)
-        } else {
-            let cur = self.engine.state.cursor.line;
-            (cur, cur)
+        let Some((start_line, end_line)) =
+            parse_line_range(range_spec, self.engine.state.cursor.line, line_count)
+        else {
+            self.engine.state.push_message(
+                MessageLevel::Warning,
+                format!("Invalid range: {}", range_spec),
+            );
+            return;
         };
 
         let mut replacements = 0;
+        let mut edits: Vec<crate::undo::Edit> = Vec::new();
 
-        // We need to process lines in reverse order if substituting across multiple
-        // lines, because inserts/deletes shift line indices.
+        // Process lines bottom-up so earlier line indices stay valid, and treat
+        // the trailing newline as part of the line. Otherwise substituting N
+        // lines joins them all into one.
         for line_idx in (start_line..=end_line).rev() {
-            let line = self.engine.buffer.get_line(line_idx);
-            let new_line = if global {
-                re.replace_all(&line, replacement)
+            let old_text = self.engine.buffer.get_line(line_idx);
+            let new_text = if global {
+                re.replace_all(&old_text, replacement.as_str()).to_string()
             } else {
-                re.replace(&line, replacement)
+                re.replace(&old_text, replacement.as_str()).to_string()
             };
-            if new_line != line {
-                replacements += 1;
-                let old_chars = line.chars().count();
-                let mod_count = self.engine.buffer.modification_count();
-
-                use crate::undo::{Edit, EditType};
-                let old_trimmed = line.trim_end_matches('\n').to_string();
-                let new_trimmed = new_line.trim_end_matches('\n').to_string();
-
-                // Push a single Replace undo entry instead of Delete+Insert.
-                self.engine.undo_manager.push(Edit {
-                    edit_type: EditType::Replace {
-                        line: line_idx,
-                        col: 0,
-                        old_text: old_trimmed.clone(),
-                        new_text: new_trimmed.clone(),
-                    },
-                    cursor_before: self.engine.state.cursor,
-                    cursor_after: self.engine.state.cursor,
-                    modification_count: mod_count,
-                });
-
-                // Replace the line content.
-                let char_start = self.engine.buffer.line_to_char(line_idx - 1);
-                let char_end = char_start + old_chars;
-                self.engine.buffer.remove_range(char_start, char_end);
-                self.engine.buffer.insert(line_idx, 0, &new_trimmed);
+            if new_text == old_text {
+                continue;
             }
+            replacements += 1;
+            let mod_count = self.engine.buffer.modification_count();
+
+            let char_start = self.engine.buffer.line_to_char(line_idx - 1);
+            let char_end = char_start + old_text.chars().count();
+            self.engine.buffer.remove_range(char_start, char_end);
+            self.engine.buffer.insert(line_idx, 0, &new_text);
+
+            edits.push(crate::undo::Edit {
+                edit_type: crate::undo::EditType::Replace {
+                    line: line_idx,
+                    col: 0,
+                    old_text,
+                    new_text,
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
+        }
+
+        // One `u` reverts the whole `:s`, like Vim. The group records the
+        // modification count from before the first substitution so undoing it
+        // restores the clean state.
+        if let Some(first) = edits.first() {
+            let modification_count = first.modification_count;
+            let cursor_before = first.cursor_before;
+            self.engine.undo_manager.push(crate::undo::Edit {
+                edit_type: crate::undo::EditType::Group { edits },
+                cursor_before,
+                cursor_after: self.engine.state.cursor,
+                modification_count,
+            });
         }
 
         self.engine.state.dirty = self.engine.buffer.is_dirty();
@@ -535,7 +569,11 @@ impl Editor {
             format!(
                 "{} substitutions on {} line{}",
                 replacements,
-                if range == "%" { "all" } else { "1" },
+                if end_line > start_line {
+                    format!("{}", end_line - start_line + 1)
+                } else {
+                    "1".to_string()
+                },
                 if replacements == 1 { "" } else { "s" }
             ),
         );
@@ -579,6 +617,7 @@ impl Editor {
     async fn save_and_emit(&mut self) {
         match self.engine.buffer.save_file().await {
             Ok(()) => {
+                self.engine.state.dirty = false;
                 self.engine
                     .plugin_manager
                     .emit(crate::types::PluginEvent::BufferSave {
@@ -605,6 +644,7 @@ impl Editor {
         match self.engine.buffer.save_to_path(&path).await {
             Ok(_) => {
                 self.engine.state.file_path = Some(path);
+                self.engine.state.dirty = false;
                 self.engine
                     .plugin_manager
                     .emit(crate::types::PluginEvent::BufferSave {
@@ -634,6 +674,7 @@ impl Editor {
         match self.engine.buffer.save_to_path(&path).await {
             Ok(_) => {
                 self.engine.state.file_path = Some(path);
+                self.engine.state.dirty = false;
                 self.engine
                     .plugin_manager
                     .emit(crate::types::PluginEvent::BufferSave {
@@ -718,5 +759,93 @@ impl Editor {
                 format!("File not found in this branch: {}", path_str),
             );
         }
+    }
+}
+
+/// Parse a `:s` range: `%`, ``, `3`, `1,5`, `.,$`, `$`.
+///
+/// Returns `(start, end)` clamped to the buffer, or `None` when the text is
+/// not a range (so the caller can report it instead of guessing).
+fn parse_line_range(spec: &str, current: usize, line_count: usize) -> Option<(usize, usize)> {
+    if spec == "%" {
+        return Some((1, line_count.max(1)));
+    }
+    match spec.split_once(',') {
+        Some((a, b)) => {
+            let start = parse_line_bound(a, current, line_count)?;
+            let end = parse_line_bound(b, current, line_count)?;
+            Some((start.min(end), start.max(end)))
+        }
+        None => {
+            let n = parse_line_bound(spec, current, line_count)?;
+            Some((n, n))
+        }
+    }
+}
+
+fn parse_line_bound(token: &str, current: usize, line_count: usize) -> Option<usize> {
+    let token = token.trim();
+    match token {
+        "" | "." => Some(current),
+        "$" => Some(line_count.max(1)),
+        _ => token
+            .parse::<usize>()
+            .ok()
+            .map(|n| n.clamp(1, line_count.max(1))),
+    }
+}
+
+/// Translate Vim replacement syntax into the `regex` crate's.
+///
+/// Vim: `&` = whole match, `\1`..`\9` = capture groups, `\&` = literal `&`.
+/// regex: `$0` = whole match, `$1`..`$9` = capture groups, `$$` = literal `$`.
+fn translate_replacement(replacement: &str) -> String {
+    let mut out = String::new();
+    let mut chars = replacement.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(d @ '1'..='9') => {
+                    out.push('$');
+                    out.push(d);
+                }
+                Some('&') => out.push('&'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            '&' => out.push_str("$0"),
+            '$' => out.push_str("$$"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod substitute_tests {
+    use super::*;
+
+    #[test]
+    fn ranges_parse() {
+        assert_eq!(parse_line_range("%", 3, 10), Some((1, 10)));
+        assert_eq!(parse_line_range("", 3, 10), Some((3, 3)));
+        assert_eq!(parse_line_range("3", 7, 10), Some((3, 3)));
+        assert_eq!(parse_line_range("1,5", 7, 10), Some((1, 5)));
+        assert_eq!(parse_line_range(".,$", 4, 10), Some((4, 10)));
+        assert_eq!(parse_line_range("5,2", 1, 10), Some((2, 5)));
+        assert_eq!(parse_line_range("99", 1, 10), Some((10, 10)), "clamped");
+        assert_eq!(parse_line_range("x", 1, 10), None);
+        assert_eq!(parse_line_range("1,x", 1, 10), None);
+    }
+
+    #[test]
+    fn replacement_translates_vim_syntax() {
+        assert_eq!(translate_replacement("<&>"), "<$0>");
+        assert_eq!(translate_replacement(r"\1-\2"), "$1-$2");
+        assert_eq!(translate_replacement(r"\&"), "&");
+        assert_eq!(translate_replacement("cost: $5"), "cost: $$5");
     }
 }

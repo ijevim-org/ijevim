@@ -124,7 +124,7 @@ pub fn render_dashboard(screen: &mut ScreenBuffer, rows: usize, cols: usize) {
         ..CellStyle::default()
     };
     let sep_len = 40.min(cols.saturating_sub(4));
-    let sep_str: String = std::iter::repeat('─').take(sep_len).collect();
+    let sep_str: String = "─".repeat(sep_len);
     let sep_col = cols.saturating_sub(sep_len) / 2;
     for (j, ch) in sep_str.chars().enumerate() {
         let target_col = sep_col + j;

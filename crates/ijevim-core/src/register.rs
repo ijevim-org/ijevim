@@ -29,10 +29,26 @@ impl Register {
 
     pub fn set(&mut self, name: char, content: &str) {
         let reg = name.to_ascii_lowercase();
-        self.registers.insert(reg, content.to_string());
+
+        // Uppercase register names append (Vim: `"Ayy` appends to register a).
+        let value = if name.is_ascii_uppercase() {
+            let mut merged = self.registers.get(&reg).cloned().unwrap_or_default();
+            merged.push_str(content);
+            merged
+        } else {
+            content.to_string()
+        };
+
+        self.registers.insert(reg, value.clone());
+
+        // Named registers mirror the unnamed register so `p` works right after
+        // `"ayy`, matching Vim.
+        if reg != '"' {
+            self.registers.insert('"', value.clone());
+        }
 
         if reg == '"' || reg == '+' {
-            copy_to_system_clipboard(content);
+            copy_to_system_clipboard(&value);
         }
     }
 

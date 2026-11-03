@@ -161,8 +161,7 @@ impl Editor {
                 self.engine.buffer.delete(line, col - 1);
                 self.engine.buffer.insert_char(line, col - 1, c2);
                 self.engine.buffer.insert_char(line, col, c1);
-                self.engine.state.cursor.col =
-                    (col + 1).min(self.engine.buffer.line_char_len(line).saturating_sub(1));
+                self.engine.state.cursor.col = (col + 1).min(self.engine.buffer.line_max_col(line));
                 self.on_buffer_modified();
             }
         }
@@ -193,37 +192,51 @@ impl Editor {
     }
 
     pub fn kill_word(&mut self) {
-        let (_, _, end_col) = self
-            .engine
-            .buffer
-            .get_word_range(self.engine.state.cursor.line, self.engine.state.cursor.col);
-        if end_col > self.engine.state.cursor.col {
-            self.engine.buffer.delete_range(
-                self.engine.state.cursor.line,
-                self.engine.state.cursor.col,
-                self.engine.state.cursor.line,
-                end_col,
-            );
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let (_, _, end_col) = self.engine.buffer.get_word_range(line, col);
+        let mod_count = self.engine.buffer.modification_count();
+
+        if end_col > col {
+            let deleted = self.engine.buffer.delete_range(line, col, line, end_col);
+            if !deleted.is_empty() {
+                self.engine.kill_ring.push(&deleted);
+            }
+            self.engine.undo_manager.push(Edit {
+                edit_type: EditType::Delete {
+                    line,
+                    col,
+                    text: deleted,
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
             self.on_buffer_modified();
-        } else if self.engine.state.cursor.line < self.engine.buffer.line_count() {
-            self.engine.buffer.delete_range(
-                self.engine.state.cursor.line,
-                self.engine.state.cursor.col,
-                self.engine.state.cursor.line + 1,
-                0,
-            );
+        } else if line < self.engine.buffer.line_count() {
+            // C-k at end of line joins the next line, like Emacs.
+            let join_col = self.engine.buffer.line_content_len(line).max(col);
+            self.engine.buffer.merge_with_prev_line(line + 1);
+            self.engine.kill_ring.push("\n");
+            self.engine.undo_manager.push(Edit {
+                edit_type: EditType::Merge {
+                    line,
+                    deleted_newline_col: join_col,
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
             self.on_buffer_modified();
         }
     }
 
     pub(crate) fn kill_line(&mut self) {
         let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-        let line_char_len = line.chars().count();
-        let end_col = if line_char_len > 0 && line.ends_with('\n') {
-            line_char_len - 1
-        } else {
-            line_char_len
-        };
+        let end_col = self
+            .engine
+            .buffer
+            .line_content_len(self.engine.state.cursor.line);
         if self.engine.state.cursor.col < end_col {
             let deleted: String = line
                 .chars()
@@ -286,18 +299,20 @@ impl Editor {
     }
 
     pub(crate) fn insert_newline(&mut self) {
-        let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-        let (_, after) = line.split_at(self.engine.state.cursor.col);
-        self.engine.buffer.insert(
-            self.engine.state.cursor.line,
-            self.engine.state.cursor.col,
-            "\n",
-        );
-        if !after.is_empty() {
-            self.engine
-                .buffer
-                .insert(self.engine.state.cursor.line + 1, 0, after);
-        }
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let mod_count = self.engine.buffer.modification_count();
+
+        // Splitting the line is a single newline insertion: everything after
+        // the cursor stays on the new line automatically.
+        self.engine.buffer.insert(line, col, "\n");
+
+        self.engine.undo_manager.push(Edit {
+            edit_type: EditType::Split { line, col },
+            cursor_before: self.engine.state.cursor,
+            cursor_after: self.engine.state.cursor,
+            modification_count: mod_count,
+        });
         self.engine.state.cursor.line += 1;
         self.engine.state.cursor.col = 0;
         self.on_buffer_modified();
@@ -305,8 +320,11 @@ impl Editor {
 
     pub(crate) fn delete_char_forward(&mut self) {
         let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-        let line_char_len = line.chars().count();
-        if self.engine.state.cursor.col < line_char_len {
+        let content_len = self
+            .engine
+            .buffer
+            .line_content_len(self.engine.state.cursor.line);
+        if self.engine.state.cursor.col < content_len {
             let deleted_char = line
                 .chars()
                 .nth(self.engine.state.cursor.col)

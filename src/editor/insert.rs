@@ -90,6 +90,21 @@ impl Editor {
                 self.engine.insert_state.accum.push('\n');
                 self.on_buffer_modified();
             }
+            KeyCode::Tab => {
+                let text = if self.engine.state.expandtab {
+                    " ".repeat(self.engine.state.shiftwidth)
+                } else {
+                    "\t".to_string()
+                };
+                self.engine.buffer.insert(
+                    self.engine.state.cursor.line,
+                    self.engine.state.cursor.col,
+                    &text,
+                );
+                self.engine.state.cursor.col += text.chars().count();
+                self.engine.insert_state.accum.push_str(&text);
+                self.on_buffer_modified();
+            }
             KeyCode::Char(c) => {
                 self.engine.buffer.insert_char(
                     self.engine.state.cursor.line,
@@ -107,28 +122,37 @@ impl Editor {
     /// Delete from cursor to beginning of the current word (Ctrl-w in Insert mode).
     pub(crate) fn insert_delete_word_backward(&mut self) {
         let line = self.engine.state.cursor.line;
-        let col = self.engine.state.cursor.col;
-        let line_str = self.engine.buffer.get_line(line);
-        let prefix: String = line_str.chars().take(col).collect();
-
-        // Find the start of the word before cursor.
-        let start = prefix
-            .chars()
-            .rev()
-            .position(|c| c.is_whitespace())
-            .map(|pos| col - pos)
-            .unwrap_or(0);
-
-        let deleted = &prefix[start..col];
-        if !deleted.is_empty() {
-            self.engine.buffer.delete_range(line, start, line, col);
-            self.engine.state.cursor.col = start;
-            // Remove deleted chars from accumulator
-            for _ in deleted.chars() {
-                self.engine.insert_state.accum.pop();
-            }
-            self.on_buffer_modified();
+        let col = self
+            .engine
+            .state
+            .cursor
+            .col
+            .min(self.engine.buffer.line_content_len(line));
+        if col == 0 {
+            return;
         }
+
+        // Work in character indices throughout. Slicing the line as a `String`
+        // with a character column would panic on multi-byte input.
+        let chars = self.engine.buffer.line_chars(line);
+        let mut start = col;
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if start == col {
+            return;
+        }
+
+        self.engine.buffer.delete_range(line, start, line, col);
+        self.engine.state.cursor.col = start;
+        // Remove deleted chars from accumulator
+        for _ in 0..(col - start) {
+            self.engine.insert_state.accum.pop();
+        }
+        self.on_buffer_modified();
     }
 
     /// Delete from cursor to beginning of line (Ctrl-u in Insert mode).
@@ -165,17 +189,37 @@ impl Editor {
             }
         }
 
+        // Vim aborts `{count}r` when the line has fewer characters left:
+        // `5r!` on a two-character line changes nothing at all.
+        let available = self.engine.buffer.line_content_len(line) - self.engine.state.cursor.col;
+        if count > available {
+            self.engine.operator_state.replace_char = None;
+            self.transition_mode(Mode::Normal);
+            self.needs_render = true;
+            return;
+        }
+
+        // `3r!` cannot extend a line: only the characters that exist are
+        // replaced, so the line length stays the same.
+        let replaced = old_text.chars().count();
+        if replaced == 0 {
+            self.engine.operator_state.replace_char = None;
+            self.transition_mode(Mode::Normal);
+            self.needs_render = true;
+            return;
+        }
+
         // Perform the replace — delete old, insert new.
-        let start_char =
-            self.engine.buffer.line_to_char(line.saturating_sub(1)) + self.engine.state.cursor.col;
-        let end_char = start_char + old_text.chars().count();
+        let start_col = self.engine.state.cursor.col;
+        let start_char = self.engine.buffer.line_to_char(line.saturating_sub(1)) + start_col;
+        let end_char = start_char + replaced;
         self.engine.buffer.remove_range(start_char, end_char);
-        let new_text: String = (0..count).map(|_| c).collect();
-        self.engine.buffer.insert(
-            self.engine.state.cursor.line,
-            self.engine.state.cursor.col,
-            &new_text,
-        );
+        let new_text: String = (0..replaced).map(|_| c).collect();
+        self.engine
+            .buffer
+            .insert(self.engine.state.cursor.line, start_col, &new_text);
+        // Vim leaves the cursor on the last replaced character.
+        self.engine.state.cursor.col = start_col + replaced - 1;
 
         // Push undo entry.
         let mod_count = self.engine.buffer.modification_count();
@@ -226,7 +270,7 @@ impl Editor {
                 // ── Multi-char Replace mode (R) ───────────────────
                 let line = self.engine.state.cursor.line;
                 let col = self.engine.state.cursor.col;
-                let old_char = if col < self.engine.buffer.line_char_len(line) {
+                let old_char = if col < self.engine.buffer.line_content_len(line) {
                     let line_str = self.engine.buffer.get_line(line);
                     line_str.chars().nth(col).unwrap_or('\0')
                 } else {

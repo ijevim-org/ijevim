@@ -3,61 +3,68 @@ use crate::undo::{Edit, EditType};
 use crossterm::event::KeyCode;
 
 impl Editor {
-    pub(crate) fn indent_lines(&mut self, register: char, indent: bool) {
-        let line = self.engine.state.cursor.line;
-        let content = self.engine.buffer.get_line(line);
-        let _ = register;
-        let mod_count = self.engine.buffer.modification_count();
+    /// Indent or unindent `first..=last`, one undo group.
+    ///
+    /// Vim moves the cursor to the first non-blank afterwards, which is what
+    /// `>>` on a tab-indented line relies on.
+    pub(crate) fn indent_lines(&mut self, first: usize, last: usize, indent: bool) {
+        let first = first.max(1);
+        let last = last.max(first).min(self.engine.buffer.content_line_count());
+        let sw = self.engine.state.shiftwidth.max(1);
+        let indent_str = if self.engine.state.expandtab {
+            " ".repeat(sw)
+        } else {
+            "\t".to_string()
+        };
 
-        if indent {
-            let indent_str = if self.engine.state.expandtab {
-                " ".repeat(self.engine.state.shiftwidth)
-            } else {
+        let mut edits = Vec::new();
+        for line in first..=last {
+            let content = self.engine.buffer.get_line(line);
+            let mod_count = self.engine.buffer.modification_count();
+
+            if indent {
+                self.engine.buffer.insert(line, 0, &indent_str);
+                edits.push(Edit {
+                    edit_type: EditType::Insert {
+                        line,
+                        col: 0,
+                        text: indent_str.clone(),
+                    },
+                    cursor_before: self.engine.state.cursor,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                });
+                continue;
+            }
+
+            // Unindent one shiftwidth: a leading tab, or up to `sw` spaces.
+            let removed = if content.starts_with('\t') {
                 "\t".to_string()
+            } else {
+                let count = content.chars().take(sw).take_while(|c| *c == ' ').count();
+                " ".repeat(count)
             };
-            self.engine.buffer.insert(line, 0, &indent_str);
-            self.engine.undo_manager.push(Edit {
-                edit_type: EditType::Insert {
+            if removed.is_empty() {
+                continue;
+            }
+            for _ in 0..removed.chars().count() {
+                self.engine.buffer.delete(line, 0);
+            }
+            edits.push(Edit {
+                edit_type: EditType::Delete {
                     line,
                     col: 0,
-                    text: indent_str,
+                    text: removed,
                 },
                 cursor_before: self.engine.state.cursor,
                 cursor_after: self.engine.state.cursor,
                 modification_count: mod_count,
             });
-        } else {
-            // Unindent: try to remove `shiftwidth` spaces or one tab.
-            let sw = self.engine.state.shiftwidth;
-            if content.starts_with('\t') {
-                self.engine.buffer.delete(line, 0);
-                self.engine.undo_manager.push(Edit {
-                    edit_type: EditType::Delete {
-                        line,
-                        col: 0,
-                        text: "\t".to_string(),
-                    },
-                    cursor_before: self.engine.state.cursor,
-                    cursor_after: self.engine.state.cursor,
-                    modification_count: mod_count,
-                });
-            } else if content.starts_with(&" ".repeat(sw)) {
-                for _ in 0..sw {
-                    self.engine.buffer.delete(line, 0);
-                }
-                self.engine.undo_manager.push(Edit {
-                    edit_type: EditType::Delete {
-                        line,
-                        col: 0,
-                        text: " ".repeat(sw),
-                    },
-                    cursor_before: self.engine.state.cursor,
-                    cursor_after: self.engine.state.cursor,
-                    modification_count: mod_count,
-                });
-            }
         }
 
+        self.push_undo_group(edits);
+        let line = self.engine.state.cursor.line;
+        self.engine.state.cursor.col = self.first_non_blank_col(line);
         self.engine.dot_last_action = Some(crate::types::DotAction::Indent { unindent: !indent });
         self.needs_render = true;
     }
@@ -68,72 +75,26 @@ impl Editor {
         register: char,
         inner: bool,
     ) {
-        if let KeyCode::Char('w') = key {
-            if inner {
-                let (word, start, _) = self
-                    .engine
-                    .buffer
-                    .get_word_range(self.engine.state.cursor.line, self.engine.state.cursor.col);
-                if !word.is_empty() {
-                    let word_chars = word.chars().count();
-                    let content = self.engine.buffer.get_char_range(
-                        self.engine.state.cursor.line,
-                        start,
-                        self.engine.state.cursor.line,
-                        start + word_chars,
-                    );
-                    self.engine.register.set(register, &content);
-                    let char_start = self
-                        .engine
-                        .buffer
-                        .line_to_char(self.engine.state.cursor.line - 1)
-                        + start;
-                    let char_end = char_start + word_chars;
-                    self.engine.buffer.remove_range(char_start, char_end);
-                }
-            }
-            let prev_mode = self.engine.state.mode;
-            self.engine.state.mode = crate::types::Mode::Insert;
-            self.engine
-                .plugin_manager
-                .emit(crate::types::PluginEvent::ModeChange {
-                    from: prev_mode,
-                    to: crate::types::Mode::Insert,
-                });
-            self.on_buffer_modified();
-        } else if let KeyCode::Char('W') = key {
-            // `cW` — change WORD
-            let (word, start, _end) = self
-                .engine
-                .buffer
-                .get_word_range_upper(self.engine.state.cursor.line, self.engine.state.cursor.col);
-            if !word.is_empty() {
-                let word_chars = word.chars().count();
-                let content = self.engine.buffer.get_char_range(
-                    self.engine.state.cursor.line,
-                    start,
-                    self.engine.state.cursor.line,
-                    start + word_chars,
-                );
-                self.engine.register.set(register, &content);
-                let char_start = self
-                    .engine
-                    .buffer
-                    .line_to_char(self.engine.state.cursor.line - 1)
-                    + start;
-                let char_end = char_start + word_chars;
-                self.engine.buffer.remove_range(char_start, char_end);
-            }
-            let prev_mode = self.engine.state.mode;
-            self.engine.state.mode = crate::types::Mode::Insert;
-            self.engine
-                .plugin_manager
-                .emit(crate::types::PluginEvent::ModeChange {
-                    from: prev_mode,
-                    to: crate::types::Mode::Insert,
-                });
-            self.on_buffer_modified();
+        if !matches!(key, KeyCode::Char(_)) {
+            return;
         }
+
+        // The delete path already selects the right range for every text
+        // object (word/WORD/quotes/brackets) and records the undo entry, so
+        // change is "delete the object, then insert".
+        self.handle_text_object(key, register, inner).await;
+
+        let prev_mode = self.engine.state.mode;
+        self.engine.state.mode = crate::types::Mode::Insert;
+        self.engine.insert_state.accum.clear();
+        self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
+        self.engine
+            .plugin_manager
+            .emit(crate::types::PluginEvent::ModeChange {
+                from: prev_mode,
+                to: crate::types::Mode::Insert,
+            });
+        self.on_buffer_modified();
     }
 
     #[allow(clippy::single_match)]

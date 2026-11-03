@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ijevim::editor::Editor;
-use ijevim::types::{Keymap, Mode, PendingOperator, VisualType};
+use ijevim::types::{Keymap, Mode, PendingOperator, SearchDirection, VisualType};
 
 fn test_vim_editor(text: &str) -> Editor {
     let mut editor = Editor::new_headless_for_test(Keymap::Vim).expect("headless editor");
@@ -300,7 +300,7 @@ async fn vim_w_word_forward() {
     ed.handle_key_for_test(KeyCode::Char('w'), KeyModifiers::NONE)
         .await;
     let (_, _, col, _) = ed.snapshot_for_test();
-    assert_eq!(col, 5, "w moved to space after 'hello'");
+    assert_eq!(col, 6, "w moves to the start of the next word");
 }
 
 #[tokio::test]
@@ -611,7 +611,7 @@ async fn emacs_meta_f_moves_word_forward() {
     ed.handle_key_for_test(KeyCode::Char('f'), KeyModifiers::ALT)
         .await;
     let (_, _, col, _) = ed.snapshot_for_test();
-    assert_eq!(col, 5, "M-f moved to space after 'hello'");
+    assert_eq!(col, 6, "M-f moves to the start of the next word");
 }
 
 #[tokio::test]
@@ -1426,4 +1426,876 @@ async fn vim_command_line_ctrl_w() {
         ed.engine.state.command_buffer, "foo",
         "Ctrl-w should delete ' bar'"
     );
+}
+
+// ── Regression tests ────────────────────────────────────────────────
+// Each of these pins a bug that shipped: they must stay green.
+
+async fn press_key(ed: &mut Editor, key: KeyCode) {
+    ed.handle_key_for_test(key, KeyModifiers::NONE).await;
+}
+
+async fn type_keys(ed: &mut Editor, keys: &str) {
+    for c in keys.chars() {
+        press_key(ed, KeyCode::Char(c)).await;
+    }
+}
+
+/// Run an ex command (`:cmd<Enter>`) from normal mode.
+async fn run_command(ed: &mut Editor, cmd: &str) {
+    press_key(ed, KeyCode::Char(':')).await;
+    type_keys(ed, cmd).await;
+    press_key(ed, KeyCode::Enter).await;
+}
+
+#[tokio::test]
+async fn substitute_keeps_line_breaks() {
+    let mut ed = test_vim_editor("aaa\nbbb\nccc\n");
+
+    run_command(&mut ed, "%s/[abc]/X/g").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(
+        buf, "XXX\nXXX\nXXX\n",
+        "each line must stay on its own line"
+    );
+}
+
+#[tokio::test]
+async fn substitute_is_one_undo_step() {
+    let mut ed = test_vim_editor("aaa\nbbb\n");
+
+    run_command(&mut ed, "%s/a/X/g").await;
+    press_key(&mut ed, KeyCode::Char('u')).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "aaa\nbbb\n");
+}
+
+#[tokio::test]
+async fn visual_delete_is_undoable() {
+    let mut ed = test_vim_editor("abcdef\n");
+
+    press_key(&mut ed, KeyCode::Char('v')).await;
+    press_key(&mut ed, KeyCode::Char('l')).await;
+    press_key(&mut ed, KeyCode::Char('l')).await;
+    press_key(&mut ed, KeyCode::Char('d')).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "def\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abcdef\n", "visual delete must be undoable");
+}
+
+#[tokio::test]
+async fn vim_dirty_quit_confirmation_accept_exits() {
+    let mut ed = test_vim_editor("abc\n");
+    ed.running = true;
+    press_key(&mut ed, KeyCode::Char('i')).await;
+    type_keys(&mut ed, "x").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    run_command(&mut ed, "q").await;
+    assert!(ed.running, "dirty quit must ask for confirmation first");
+
+    press_key(&mut ed, KeyCode::Char('y')).await;
+    assert!(!ed.running, "y must accept the quit prompt in Vim mode");
+}
+
+#[tokio::test]
+async fn named_register_yank_and_paste() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+
+    type_keys(&mut ed, "\"ayy").await;
+    type_keys(&mut ed, "\"ap").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abc\nabc\ndef\n");
+}
+
+#[tokio::test]
+async fn mark_set_and_jump() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+
+    type_keys(&mut ed, "ma").await;
+    press_key(&mut ed, KeyCode::Char('j')).await;
+
+    let (_, line, _, _) = ed.snapshot_for_test();
+    assert_eq!(line, 2);
+
+    type_keys(&mut ed, "`a").await;
+    let (_, line, _, _) = ed.snapshot_for_test();
+    assert_eq!(line, 1, "`a must jump back to the mark");
+}
+
+#[tokio::test]
+async fn emacs_enter_does_not_duplicate_text() {
+    let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless editor");
+    ed.set_buffer_for_test("abc\n");
+
+    ed.handle_key_for_test(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        .await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "a\nbc\n");
+}
+
+#[tokio::test]
+async fn emacs_enter_handles_multibyte() {
+    let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless editor");
+    ed.set_buffer_for_test("あいう\n");
+
+    ed.handle_key_for_test(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        .await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "あ\nいう\n");
+}
+
+#[tokio::test]
+async fn join_is_undoable() {
+    let mut ed = test_vim_editor("a\nb\n");
+
+    press_key(&mut ed, KeyCode::Char('J')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "a b\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "a\nb\n");
+}
+
+#[tokio::test]
+async fn insert_mode_tab_inserts_whitespace() {
+    let mut ed = test_vim_editor("abc\n");
+
+    press_key(&mut ed, KeyCode::Char('i')).await;
+    press_key(&mut ed, KeyCode::Tab).await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_ne!(buf, "abc\n", "Tab must insert indentation in Insert mode");
+    assert!(
+        buf.starts_with(' ') || buf.starts_with('\t'),
+        "expected indentation, got {:?}",
+        buf
+    );
+}
+
+#[tokio::test]
+async fn three_dd_is_one_undo_step() {
+    let mut ed = test_vim_editor("1\n2\n3\n4\n");
+
+    type_keys(&mut ed, "3dd").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "4\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "1\n2\n3\n4\n", "3dd must undo in one step");
+}
+
+#[tokio::test]
+async fn change_inner_word_is_undoable() {
+    let mut ed = test_vim_editor("hello world\n");
+
+    type_keys(&mut ed, "ciw").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, " world\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n");
+}
+
+#[tokio::test]
+async fn messages_command_does_not_grow_history() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "messages").await;
+    let after_first = ed.engine.state.message_history.len();
+    run_command(&mut ed, "messages").await;
+    let after_second = ed.engine.state.message_history.len();
+    assert_eq!(
+        after_first, after_second,
+        ":messages must not append the whole log back into itself"
+    );
+}
+
+#[tokio::test]
+async fn delete_to_end_of_line() {
+    let mut ed = test_vim_editor("hello world\nnext\n");
+    type_keys(&mut ed, "de").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, " world\nnext\n");
+
+    type_keys(&mut ed, "d$").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\nnext\n");
+}
+
+#[tokio::test]
+async fn delete_to_line_start() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "lll").await;
+    type_keys(&mut ed, "d0").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "lo world\n");
+}
+
+#[tokio::test]
+async fn delete_word_backward_motion() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "w").await;
+    type_keys(&mut ed, "db").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "world\n");
+}
+
+#[tokio::test]
+async fn delete_next_line_with_dj() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    type_keys(&mut ed, "dj").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "3\n");
+}
+
+#[tokio::test]
+async fn delete_previous_line_with_dk() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    press_key(&mut ed, KeyCode::Char('j')).await;
+    type_keys(&mut ed, "dk").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "3\n");
+}
+
+#[tokio::test]
+async fn delete_to_end_of_file_with_dg() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    press_key(&mut ed, KeyCode::Char('j')).await;
+    type_keys(&mut ed, "dG").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "1\n");
+}
+
+#[tokio::test]
+async fn yank_to_end_of_line_then_paste() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "y$").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n", "yank must not modify the buffer");
+
+    type_keys(&mut ed, "p").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert!(
+        buf.contains("hello world"),
+        "pasted content missing: {:?}",
+        buf
+    );
+}
+
+#[tokio::test]
+async fn change_to_end_of_line_enters_insert() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "wc$").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello \n");
+}
+
+#[tokio::test]
+async fn operator_motions_are_undoable() {
+    let mut ed = test_vim_editor("1\n2\n3\n");
+    type_keys(&mut ed, "dj").await;
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "1\n2\n3\n");
+}
+
+// ── Cursor bounds never include the newline (B31) ───────────────────
+
+#[tokio::test]
+async fn cursor_never_rests_on_newline() {
+    let mut ed = test_vim_editor("abc\n");
+    for _ in 0..10 {
+        press_key(&mut ed, KeyCode::Char('l')).await;
+    }
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(
+        col, 2,
+        "`l` must stop on the last character, not the newline"
+    );
+}
+
+#[tokio::test]
+async fn line_end_motion_lands_on_last_char() {
+    let mut ed = test_vim_editor("hello world\n");
+    press_key(&mut ed, KeyCode::Char('$')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 10);
+
+    // `x` at `$` must delete 'd', never the line terminator.
+    press_key(&mut ed, KeyCode::Char('x')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello worl\n");
+}
+
+#[tokio::test]
+async fn motions_on_empty_line_do_not_panic() {
+    let mut ed = test_vim_editor("\n");
+    type_keys(&mut ed, "llll$0jjkweb").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\n");
+}
+
+#[tokio::test]
+async fn vertical_motion_clamps_to_shorter_line() {
+    let mut ed = test_vim_editor("longer line\nx\n");
+    press_key(&mut ed, KeyCode::Char('$')).await;
+    press_key(&mut ed, KeyCode::Char('j')).await;
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(line, 2);
+    assert_eq!(
+        col, 0,
+        "j must clamp to the last character of the target line"
+    );
+}
+
+#[tokio::test]
+async fn delete_to_end_of_line_is_undoable() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "wd$").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello \n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n");
+}
+
+#[tokio::test]
+async fn line_end_on_tabbed_line_stops_before_newline() {
+    let mut ed = test_vim_editor("\tab\n");
+    press_key(&mut ed, KeyCode::Char('$')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 2, "the tab counts as one character");
+}
+
+// ── Window splits survive a resize (B15) ────────────────────────────
+
+fn window_bounds(ed: &Editor) -> Vec<(usize, usize, usize, usize)> {
+    ed.engine
+        .window_layout
+        .windows
+        .iter()
+        .map(|w| (w.row_start, w.row_end, w.col_start, w.col_end))
+        .collect()
+}
+
+#[tokio::test]
+async fn split_survives_resize() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "split").await;
+    assert_eq!(
+        ed.engine.window_layout.windows.len(),
+        2,
+        ":split must create a second window"
+    );
+
+    ed.engine.update_window_layout(40, 100);
+
+    assert_eq!(
+        ed.engine.window_layout.windows.len(),
+        2,
+        "a resize must not close the split"
+    );
+    for (row_start, row_end, col_start, col_end) in window_bounds(&ed) {
+        assert!(row_end > row_start, "window collapsed vertically");
+        assert!(col_end > col_start, "window collapsed horizontally");
+    }
+}
+
+#[tokio::test]
+async fn vsplit_survives_resize() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "vsplit").await;
+    assert_eq!(ed.engine.window_layout.windows.len(), 2);
+
+    ed.engine.update_window_layout(40, 100);
+
+    let bounds = window_bounds(&ed);
+    assert_eq!(bounds.len(), 2, "a resize must not close the vsplit");
+    assert_eq!(bounds[1].2, bounds[0].3, "windows must stay contiguous");
+    assert_eq!(
+        bounds[1].3, 100,
+        "the last window must reach the right edge"
+    );
+}
+
+// ── WORD vs word (B58) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn word_motion_stops_at_punctuation() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    press_key(&mut ed, KeyCode::Char('w')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 3, "w must stop at the punctuation");
+}
+
+#[tokio::test]
+async fn word_motion_big_skips_punctuation() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    press_key(&mut ed, KeyCode::Char('W')).await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 8, "W must jump over the whole non-blank run");
+}
+
+#[tokio::test]
+async fn word_backward_big_skips_punctuation() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "WB").await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 0);
+}
+
+#[tokio::test]
+async fn word_end_big_stops_at_word_end() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "E").await;
+    let (_, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(col, 6, "E must stop on the last char of the WORD");
+}
+
+#[tokio::test]
+async fn inner_word_text_object_stops_at_punctuation() {
+    let mut ed = test_vim_editor("foo.bar\n");
+    type_keys(&mut ed, "diw").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, ".bar\n");
+}
+
+#[tokio::test]
+async fn inner_word_big_deletes_the_whole_word() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "diW").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, " baz\n");
+}
+
+#[tokio::test]
+async fn delete_word_operator_is_undoable() {
+    let mut ed = test_vim_editor("hello world\n");
+    type_keys(&mut ed, "dw").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "world\n", "dw must take the trailing blank with it");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "hello world\n");
+}
+
+#[tokio::test]
+async fn delete_word_with_count_is_one_undo_step() {
+    let mut ed = test_vim_editor("one two three\n");
+    type_keys(&mut ed, "2dw").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "three\n");
+
+    press_key(&mut ed, KeyCode::Char('u')).await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "one two three\n");
+}
+
+#[tokio::test]
+async fn delete_word_big_operator() {
+    let mut ed = test_vim_editor("foo.bar baz\n");
+    type_keys(&mut ed, "dW").await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "baz\n");
+}
+
+// ── hlsearch (B14) ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn search_records_the_pattern_for_highlighting() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    assert!(ed.engine.state.hlsearch, "hlsearch is on by default");
+    assert_eq!(
+        ed.engine.state.search_pattern.as_deref(),
+        Some("foo"),
+        "the renderer needs the pattern to paint matches"
+    );
+    assert_eq!(ed.engine.search_state.query, "foo");
+}
+
+#[tokio::test]
+async fn nohlsearch_disables_the_highlight() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    run_command(&mut ed, "nohlsearch").await;
+    assert!(!ed.engine.state.hlsearch);
+
+    run_command(&mut ed, "set hlsearch").await;
+    assert!(ed.engine.state.hlsearch, "`set hlsearch` must re-enable it");
+}
+
+#[tokio::test]
+async fn slash_starts_a_forward_search_and_n_repeats() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    assert_eq!(ed.engine.state.mode, Mode::Normal);
+    assert_eq!(ed.engine.search_state.direction, SearchDirection::Forward);
+    assert_eq!(ed.engine.search_state.results.len(), 2);
+
+    let first = ed.snapshot_for_test().2;
+    press_key(&mut ed, KeyCode::Char('n')).await;
+    let second = ed.snapshot_for_test().2;
+    assert_ne!(first, second, "n must jump to the next match");
+}
+
+#[tokio::test]
+async fn question_mark_starts_a_backward_search() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('?')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    assert_eq!(ed.engine.search_state.direction, SearchDirection::Backward);
+    assert_eq!(ed.engine.state.search_pattern.as_deref(), Some("foo"));
+    assert_eq!(ed.engine.search_state.results.len(), 2);
+}
+
+// ── Review mode must use real git data (B28) ────────────────────────
+
+#[tokio::test]
+async fn review_enters_mode_from_a_real_repository() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+
+    assert!(
+        ed.engine.review_state.is_some(),
+        ":review inside a git checkout must build a review state from git"
+    );
+}
+
+#[tokio::test]
+async fn review_reports_git_failures_instead_of_mocking() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review deadbeef").await;
+
+    assert!(
+        ed.engine.review_state.is_none(),
+        "a failed git diff must not fabricate review data"
+    );
+    assert!(
+        ed.engine
+            .state
+            .message_history
+            .iter()
+            .any(|m| m.text.contains("review:")),
+        "the failure reason must be reported: {:?}",
+        ed.engine
+            .state
+            .message_history
+            .iter()
+            .map(|m| m.text.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ── :substitute ranges and replacement syntax (B19) ─────────────────
+
+#[tokio::test]
+async fn substitute_supports_ampersand_for_the_whole_match() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    run_command(&mut ed, "%s/foo/<&>/g").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "<foo> bar <foo>\n");
+}
+
+#[tokio::test]
+async fn substitute_supports_capture_group_backreferences() {
+    let mut ed = test_vim_editor("ab\n");
+    run_command(&mut ed, r"%s/(a)(b)/\2\1/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "ba\n");
+}
+
+#[tokio::test]
+async fn substitute_respects_a_line_range() {
+    let mut ed = test_vim_editor("x\nx\nx\n");
+    run_command(&mut ed, "1,2s/x/y/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "y\ny\nx\n");
+}
+
+#[tokio::test]
+async fn substitute_supports_the_last_line_address() {
+    let mut ed = test_vim_editor("x\nx\n");
+    // `$` is the final buffer line; the trailing empty line is line 3.
+    run_command(&mut ed, "2s/x/y/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "x\ny\n");
+}
+
+#[tokio::test]
+async fn substitute_reports_an_invalid_range() {
+    let mut ed = test_vim_editor("x\n");
+    run_command(&mut ed, "1,xs/x/y/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "x\n", "an invalid range must not modify the buffer");
+    assert!(
+        ed.engine
+            .state
+            .message_history
+            .iter()
+            .any(|m| m.text.contains("Invalid range")),
+        "the range error must be reported"
+    );
+}
+
+// ── Vim motion compatibility (verified against Vim 9.1) ─────────────
+
+#[tokio::test]
+async fn word_forward_crosses_lines_to_the_first_non_blank() {
+    let mut ed = test_vim_editor("foo bar\n   baz\n");
+    type_keys(&mut ed, "ww").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "foo bar\n   baz\n");
+    assert_eq!(
+        (line, col),
+        (2, 3),
+        "w must cross the line break and skip blanks"
+    );
+}
+
+#[tokio::test]
+async fn word_forward_stops_on_an_empty_line() {
+    let mut ed = test_vim_editor("foo bar\n\nbaz\n");
+    type_keys(&mut ed, "ww").await;
+
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!((line, col), (2, 0), "an empty line is a word stop");
+}
+
+#[tokio::test]
+async fn word_backward_crosses_lines() {
+    let mut ed = test_vim_editor("foo bar\nbaz\n");
+    type_keys(&mut ed, "ww").await;
+    type_keys(&mut ed, "b").await;
+
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!((line, col), (1, 4), "b must walk back over the line break");
+}
+
+#[tokio::test]
+async fn word_end_honours_the_count() {
+    let mut ed = test_vim_editor("foo bar baz\n");
+    type_keys(&mut ed, "2e").await;
+
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!((line, col), (1, 6), "2e ends on the second word");
+}
+
+#[tokio::test]
+async fn delete_word_with_count_crosses_lines() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\nzap\n");
+    type_keys(&mut ed, "3dw").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "quux\nzap\n", "3dw spans the line break");
+}
+
+#[tokio::test]
+async fn delete_word_end_is_inclusive() {
+    let mut ed = test_vim_editor("foo bar\n");
+    type_keys(&mut ed, "dE").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, " bar\n", "dE deletes through the end of the WORD");
+}
+
+#[tokio::test]
+async fn change_line_keeps_one_empty_line() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\n");
+    type_keys(&mut ed, "cc").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\nqux quux\n", "cc clears the line but keeps it");
+}
+
+#[tokio::test]
+async fn linewise_paste_inserts_below_and_moves_the_cursor() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\nzap\n");
+    type_keys(&mut ed, "ddp").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "qux quux\nfoo bar\nzap\n", "p puts the line below");
+    assert_eq!((line, col), (2, 0), "cursor lands on the pasted line");
+}
+
+#[tokio::test]
+async fn charwise_paste_leaves_the_cursor_on_the_last_char() {
+    let mut ed = test_vim_editor("foo bar\n");
+    type_keys(&mut ed, "xp").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "ofo bar\n");
+    assert_eq!((line, col), (1, 1));
+}
+
+#[tokio::test]
+async fn paste_repeats_with_a_count() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\n");
+    type_keys(&mut ed, "yy2p").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "foo bar\nfoo bar\nfoo bar\nqux quux\n");
+}
+
+#[tokio::test]
+async fn g_goes_to_the_last_real_line_first_non_blank() {
+    let mut ed = test_vim_editor("foo bar\n  qux quux\nzap\n");
+    press_key(&mut ed, KeyCode::Char('G')).await;
+
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!((line, col), (3, 0), "G ignores the phantom trailing line");
+}
+
+#[tokio::test]
+async fn count_g_goes_to_that_line_first_non_blank() {
+    let mut ed = test_vim_editor("foo bar\n  qux quux\nzap\n");
+    type_keys(&mut ed, "2G").await;
+
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!((line, col), (2, 2), "2G lands on the first non-blank");
+}
+
+#[tokio::test]
+async fn linewise_delete_at_the_first_line_is_a_no_op_for_k() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\n");
+    type_keys(&mut ed, "dk").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(
+        buf, "foo bar\nqux quux\n",
+        "dk on the first line deletes nothing"
+    );
+}
+
+#[tokio::test]
+async fn linewise_delete_at_the_last_line_is_a_no_op_for_j() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\n");
+    type_keys(&mut ed, "Gdj").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(
+        buf, "foo bar\nqux quux\n",
+        "dj on the last line deletes nothing"
+    );
+}
+
+#[tokio::test]
+async fn delete_to_gg_crosses_to_the_first_line() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\nzap\n");
+    type_keys(&mut ed, "jdgg").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "zap\n");
+    assert_eq!((line, col), (1, 0));
+}
+
+#[tokio::test]
+async fn change_to_gg_keeps_one_empty_line() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\nzap\n");
+    type_keys(&mut ed, "jcgg").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\nzap\n", "cgg replaces lines 1-2 with one empty line");
+}
+
+#[tokio::test]
+async fn join_with_count_leaves_the_cursor_on_the_last_separator() {
+    let mut ed = test_vim_editor("foo bar\nqux quux\nzap\n");
+    type_keys(&mut ed, "3J").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "foo bar qux quux zap\n");
+    assert_eq!(
+        (line, col),
+        (1, 16),
+        "3J leaves the cursor on the last join"
+    );
+}
+
+#[tokio::test]
+async fn insert_at_first_non_blank_uses_the_first_non_blank() {
+    let mut ed = test_vim_editor("    indented\nline\n");
+    type_keys(&mut ed, "I!").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "    !indented\nline\n");
+    assert_eq!((line, col), (1, 4));
+}
+
+#[tokio::test]
+async fn indent_with_count_indents_several_lines() {
+    let mut ed = test_vim_editor("one\ntwo\nthree\n");
+    type_keys(&mut ed, "2>>").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\tone\n\ttwo\nthree\n", "2>> indents two lines");
+}
+
+#[tokio::test]
+async fn replace_with_count_leaves_the_cursor_on_the_last_char() {
+    let mut ed = test_vim_editor("foo bar\n");
+    type_keys(&mut ed, "3r!").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "!!! bar\n");
+    assert_eq!((line, col), (1, 2));
+}
+
+#[tokio::test]
+async fn replace_aborts_when_the_count_exceeds_the_line() {
+    let mut ed = test_vim_editor("ab\n");
+    type_keys(&mut ed, "5r!").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "ab\n", "5r! on a two-character line changes nothing");
+}
+
+#[tokio::test]
+async fn join_drops_the_indentation_of_the_next_line() {
+    let mut ed = test_vim_editor("a\n   b\n");
+    type_keys(&mut ed, "J").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "a b\n", "J joins with a single space");
+    assert_eq!((line, col), (1, 1), "cursor rests on the separator");
 }

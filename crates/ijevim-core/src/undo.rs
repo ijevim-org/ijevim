@@ -55,6 +55,10 @@ struct UndoNode {
     edit: Edit,
     parent: Option<usize>,
     children: Vec<usize>,
+    /// Set by [`UndoManager::remove_node`]. Detached nodes stay in `nodes` to
+    /// keep the remaining indices stable, but are excluded from the tree and
+    /// from the size accounting.
+    removed: bool,
 }
 
 /// Tree-based undo manager.
@@ -80,6 +84,7 @@ impl UndoManager {
             },
             parent: None,
             children: Vec::new(),
+            removed: false,
         };
         Self {
             nodes: vec![root],
@@ -97,33 +102,48 @@ impl UndoManager {
             edit,
             parent: Some(self.current),
             children: Vec::new(),
+            removed: false,
         };
         let new_idx = self.nodes.len();
         self.nodes.push(new_node);
         self.nodes[self.current].children.push(new_idx);
         self.current = new_idx;
 
-        // Evict oldest nodes if at capacity (simple strategy: remove oldest leaf).
-        if self.nodes.len() > self.max_size {
-            self.evict_oldest();
-        }
-    }
-
-    /// Remove the oldest leaf node to stay within max_size.
-    fn evict_oldest(&mut self) {
-        // Find a leaf node that is not the current node or root.
-        // This is a simple heuristic - in practice we'd want more sophisticated eviction.
-        for i in 1..self.nodes.len() {
-            if self.nodes[i].children.is_empty() && i != self.current {
-                self.remove_node(i);
+        // Evict oldest nodes if at capacity. Only live nodes count towards the
+        // limit; detached nodes remain in the vector for index stability.
+        while self.live_node_count() > self.max_size {
+            if !self.evict_oldest() {
                 break;
             }
         }
     }
 
-    /// Remove a node from the tree (reconnect its children to its parent).
+    /// Number of nodes still attached to the tree.
+    fn live_node_count(&self) -> usize {
+        self.nodes.iter().filter(|n| !n.removed).count()
+    }
+
+    /// Remove the oldest leaf node to stay within `max_size`.
+    ///
+    /// The root is never removed, nor is the current node. Returns `false` when
+    /// no eviction candidate exists (e.g. a single linear chain whose only leaf
+    /// is the current node).
+    fn evict_oldest(&mut self) -> bool {
+        for i in 1..self.nodes.len() {
+            if !self.nodes[i].removed && self.nodes[i].children.is_empty() && i != self.current {
+                self.remove_node(i);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Detach a node from the tree, reconnecting its children to its parent.
+    ///
+    /// The node itself stays in `nodes` so existing indices remain valid, but
+    /// it is flagged `removed` and unlinked from its parent.
     fn remove_node(&mut self, idx: usize) {
-        if idx >= self.nodes.len() {
+        if idx >= self.nodes.len() || self.nodes[idx].removed {
             return;
         }
         let parent = self.nodes[idx].parent;
@@ -135,8 +155,8 @@ impl UndoManager {
                 self.nodes[p].children.push(c);
             }
         }
-        // Mark as removed by clearing children (we don't actually remove from vec to keep indices stable)
-        self.nodes[idx].children.clear();
+        self.nodes[idx].parent = None;
+        self.nodes[idx].removed = true;
     }
 
     /// Undo the current edit.
@@ -218,6 +238,7 @@ impl UndoManager {
             },
             parent: None,
             children: Vec::new(),
+            removed: false,
         }];
         self.current = 0;
     }
@@ -257,8 +278,9 @@ impl UndoManager {
                 line,
                 deleted_newline_col,
             } => {
-                let line_idx = line.saturating_sub(1);
-                buffer.insert(line_idx, *deleted_newline_col, "\n");
+                // `line` is the 1-based line that absorbed the next line; the
+                // removed newline belonged to the end of that line.
+                buffer.insert(*line, *deleted_newline_col, "\n");
             }
             EditType::Split { line, col } => {
                 let start = buffer.line_to_char(line - 1) + col;
@@ -286,7 +308,9 @@ impl UndoManager {
             }
             EditType::InsertLine { line, text } => {
                 buffer.insert(*line, 0, text);
-                buffer.insert(*line, text.len(), "\n");
+                // `insert` takes a character column; `text.len()` is bytes and
+                // corrupts non-ASCII lines.
+                buffer.insert(*line, text.chars().count(), "\n");
             }
             EditType::DeleteLine { line, text: _ } => {
                 buffer.delete_line(*line);

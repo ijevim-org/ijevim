@@ -26,7 +26,9 @@ ijevim-tui = { path = "crates/ijevim-tui" }
 # External crates shared across the workspace.
 crossterm = "0.29"
 ropey = "1.6"
-tokio = "1"
+# 1.53.3 is the first release of this series that fixes RUSTSEC-2026-0386
+# (`AsyncFd::new` I/O safety). 1.54+ raises the MSRV to 1.85, above ours.
+tokio = ">=1.53.3, <1.54"
 thiserror = "2"
 toml = "0.8"
 regex = "1"

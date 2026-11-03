@@ -45,6 +45,20 @@ impl TextBuffer {
         self.doc.len_lines()
     }
 
+    /// Number of lines that hold text.
+    ///
+    /// Ropey reports a phantom empty line after a trailing newline, so a file
+    /// ending in `\n` looks one line longer than it is. Motions like `G` must
+    /// stop on the last real line instead of that phantom.
+    pub fn content_line_count(&self) -> usize {
+        let count = self.line_count();
+        if count > 1 && self.line_content_len(count) == 0 {
+            count - 1
+        } else {
+            count.max(1)
+        }
+    }
+
     pub fn get_line(&self, line_number: usize) -> String {
         if line_number < 1 || line_number > self.line_count() {
             return String::new();
@@ -59,6 +73,26 @@ impl TextBuffer {
             return 0;
         }
         self.doc.line(line_number - 1).chars().count()
+    }
+
+    /// Character count of a line excluding its trailing line terminator.
+    ///
+    /// [`line_char_len`](Self::line_char_len) follows ropey and counts the
+    /// `\n`. A normal-mode cursor must never sit on that newline, so cursor
+    /// bounds use this instead; the last valid column is `content_len - 1`.
+    pub fn line_content_len(&self, line_number: usize) -> usize {
+        if line_number < 1 || line_number > self.line_count() {
+            return 0;
+        }
+        let line = self.get_line(line_number);
+        let line = line.strip_suffix('\n').unwrap_or(&line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        line.chars().count()
+    }
+
+    /// Last valid normal-mode column of a line (0 for an empty line).
+    pub fn line_max_col(&self, line_number: usize) -> usize {
+        self.line_content_len(line_number).saturating_sub(1)
     }
 
     /// Return the characters of a line as a `Vec<char>`.
@@ -286,44 +320,20 @@ impl TextBuffer {
         self.dirty = true;
     }
 
-    /// Test-only: force the dirty flag without going through a real mutation.
-    /// Crate-private so unit tests in `editor/` can set up quit-confirmation
-    /// scenarios without having to type a character first.
-    #[cfg(test)]
-    pub fn force_dirty(&mut self, dirty: bool) {
-        if dirty {
-            // Increment past `saved_modification_count` to make `is_dirty()` true.
-            self.modification_count = self.saved_modification_count + 1;
-            self.dirty = true;
-        } else {
-            self.mark_clean();
-        }
-    }
-
+    /// Word (keyword) run at `col`: alphanumerics and `_`, Vim's default
+    /// `iskeyword`. Punctuation is its own run, so `diw` on `foo.bar` deletes
+    /// `foo` rather than the whole token.
     pub fn get_word_at(&self, line: usize, col: usize) -> (String, usize, usize) {
-        if line < 1 || line > self.line_count() {
-            return (String::new(), 0, 0);
-        }
-        let chars: Vec<char> = self.line_chars(line);
-
-        if col >= chars.len() {
-            return (String::new(), col, col);
-        }
-
-        let mut start = col;
-        while start > 0 && !chars[start - 1].is_whitespace() {
-            start -= 1;
-        }
-
-        let mut end = col;
-        while end < chars.len() && !chars[end].is_whitespace() {
-            end += 1;
-        }
-
-        let word: String = chars[start..end].iter().collect();
-        (word, start, end)
+        self.word_range_with(line, col, false)
     }
 
+    /// WORD run at `col`: everything up to the next blank (Vim's `W`/`B`).
+    pub fn get_word_at_upper(&self, line: usize, col: usize) -> (String, usize, usize) {
+        self.word_range_with(line, col, true)
+    }
+
+    /// Word (keyword) range at the given position.
+    /// Returns (word_text, start_col, end_col).
     pub fn get_word_range(&self, line: usize, col: usize) -> (String, usize, usize) {
         self.get_word_at(line, col)
     }
@@ -332,7 +342,46 @@ impl TextBuffer {
     /// A WORD is a sequence of non-whitespace characters (Vim's `W`/`B`).
     /// Returns (word_text, start_col, end_col).
     pub fn get_word_range_upper(&self, line: usize, col: usize) -> (String, usize, usize) {
-        self.get_word_at(line, col)
+        self.get_word_at_upper(line, col)
+    }
+
+    /// Shared implementation for word and WORD ranges.
+    fn word_range_with(&self, line: usize, col: usize, big: bool) -> (String, usize, usize) {
+        if line < 1 || line > self.line_count() {
+            return (String::new(), 0, 0);
+        }
+        let chars: Vec<char> = self.line_chars(line);
+        let content_len = self.line_content_len(line);
+        if col >= content_len {
+            return (String::new(), col, col);
+        }
+
+        // 0 = blank, 1 = word, 2 = punctuation. WORDs collapse 1 and 2.
+        let class = |c: char| -> u8 {
+            if c.is_whitespace() {
+                0
+            } else if big || c.is_alphanumeric() || c == '_' {
+                1
+            } else {
+                2
+            }
+        };
+
+        let target = class(chars[col]);
+        let mut start = col;
+        while start > 0 && class(chars[start - 1]) == target {
+            start -= 1;
+        }
+        let mut end = col;
+        while end < content_len && class(chars[end]) == target {
+            end += 1;
+        }
+        if end == start {
+            end = (start + 1).min(content_len);
+        }
+
+        let word: String = chars[start..end].iter().collect();
+        (word, start, end)
     }
 
     pub fn get_line_range(&self, start_line: usize, end_line: usize) -> String {
@@ -377,13 +426,12 @@ impl TextBuffer {
         }
 
         let mut result = String::new();
-        result.push_str(
-            &self
-                .get_line(start_line)
-                .chars()
-                .skip(start_col)
-                .collect::<String>(),
-        );
+        // `get_line` keeps the line's own newline; strip it before adding the
+        // separator, otherwise every multi-line range gains a stray newline.
+        let first = self.get_line(start_line);
+        let first = first.strip_suffix('\n').unwrap_or(&first);
+        let first = first.strip_suffix('\r').unwrap_or(first);
+        result.push_str(&first.chars().skip(start_col).collect::<String>());
         result.push('\n');
         for line_num in (start_line + 1)..end_line {
             result.push_str(&self.get_line(line_num));
@@ -584,6 +632,40 @@ impl Default for TextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_line_count_ignores_the_phantom_trailing_line() {
+        let mut buf = TextBuffer::with_text("one\ntwo\n");
+        assert_eq!(
+            buf.line_count(),
+            3,
+            "ropey counts the line after the last \\n"
+        );
+        assert_eq!(buf.content_line_count(), 2);
+
+        buf = TextBuffer::with_text("one\ntwo");
+        assert_eq!(buf.content_line_count(), 2);
+
+        // A real (explicit) blank line still counts.
+        buf = TextBuffer::with_text("one\n\n");
+        assert_eq!(buf.content_line_count(), 2);
+    }
+
+    #[test]
+    fn get_char_range_does_not_double_the_line_break() {
+        let buf = TextBuffer::with_text("foo bar\nqux quux\n");
+        assert_eq!(buf.get_char_range(1, 0, 2, 4), "foo bar\nqux ");
+        assert_eq!(buf.get_char_range(1, 4, 2, 0), "bar\n");
+        assert_eq!(buf.get_char_range(1, 0, 1, 3), "foo");
+    }
+
+    #[test]
+    fn delete_range_over_lines_keeps_the_count_right() {
+        let mut buf = TextBuffer::with_text("foo bar\nqux quux\n");
+        let removed = buf.delete_range(1, 0, 2, 4);
+        assert_eq!(removed, "foo bar\nqux ");
+        assert_eq!(buf.to_string(), "quux\n");
+    }
 
     #[test]
     fn test_insert_char() {

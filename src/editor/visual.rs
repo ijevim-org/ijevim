@@ -1,5 +1,6 @@
 use crate::editor::Editor;
 use crate::types::{Mode, VisualType};
+use crate::undo::{Edit, EditType};
 use crossterm::event::KeyCode;
 
 impl Editor {
@@ -75,36 +76,31 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('l') => {
-                let line_len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
-                self.engine.state.cursor.col =
-                    (self.engine.state.cursor.col + 1).min(line_len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = (self.engine.state.cursor.col + 1).min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('j') => {
                 let line_count = self.engine.buffer.line_count();
                 self.engine.state.cursor.line = (self.engine.state.cursor.line + 1).min(line_count);
-                let len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .get_line(self.engine.state.cursor.line)
-                    .len();
-                self.engine.state.cursor.col =
-                    self.engine.state.cursor.col.min(len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('k') => {
                 self.engine.state.cursor.line =
                     self.engine.state.cursor.line.saturating_sub(1).max(1);
-                let len = self
+                let max_col = self
                     .engine
                     .buffer
-                    .get_line(self.engine.state.cursor.line)
-                    .len();
-                self.engine.state.cursor.col =
-                    self.engine.state.cursor.col.min(len.saturating_sub(1));
+                    .line_max_col(self.engine.state.cursor.line);
+                self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
                 self.needs_render = true;
             }
             KeyCode::Char('0') => {
@@ -118,16 +114,10 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('$') => {
-                let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
-                let line_char_len = self
+                self.engine.state.cursor.col = self
                     .engine
                     .buffer
-                    .line_char_len(self.engine.state.cursor.line);
-                self.engine.state.cursor.col = if line_char_len > 0 && line.ends_with('\n') {
-                    line_char_len.saturating_sub(2)
-                } else {
-                    line_char_len.saturating_sub(1)
-                };
+                    .line_max_col(self.engine.state.cursor.line);
                 self.needs_render = true;
             }
             KeyCode::Char('I') if self.engine.state.visual_type == Some(VisualType::Block) => {
@@ -196,11 +186,12 @@ impl Editor {
                         self.normalize_line_selection(start.line, self.engine.state.cursor.line);
                     self.engine.buffer.get_line_range(s_line, e_line)
                 }
+                // Block ranges are end-exclusive, so include the cursor column.
                 VisualType::Block => self.engine.buffer.get_block_range(
                     start.line,
                     start.col,
                     self.engine.state.cursor.line,
-                    self.engine.state.cursor.col,
+                    self.engine.state.cursor.col + 1,
                 ),
             };
             self.engine.register.set('"', &content);
@@ -212,15 +203,30 @@ impl Editor {
             &self.engine.state.visual_start,
             self.engine.state.visual_type,
         ) {
+            let start = *start;
+            let mod_count = self.engine.buffer.modification_count();
+            let cursor_before = self.engine.state.cursor;
+            let mut edits: Vec<Edit> = Vec::new();
+
             let (cursor_line, cursor_col) = match vtype {
                 VisualType::Character => {
                     let (s_line, s_col, e_line, e_col) =
-                        self.normalize_selection(start, &self.engine.state.cursor);
+                        self.normalize_selection(&start, &self.engine.state.cursor);
                     let content = self
                         .engine
                         .buffer
                         .delete_range(s_line, s_col, e_line, e_col);
                     self.engine.register.set('"', &content);
+                    edits.push(Edit {
+                        edit_type: EditType::Delete {
+                            line: s_line,
+                            col: s_col,
+                            text: content,
+                        },
+                        cursor_before,
+                        cursor_after: self.engine.state.cursor,
+                        modification_count: mod_count,
+                    });
                     (s_line, s_col)
                 }
                 VisualType::Line => {
@@ -228,12 +234,18 @@ impl Editor {
                         self.normalize_line_selection(start.line, self.engine.state.cursor.line);
                     let count = e_line.saturating_sub(s_line) + 1;
                     let mut content = String::new();
-                    for i in 0..count {
+                    for _ in 0..count {
                         let deleted = self.engine.buffer.delete_line(s_line);
                         content.push_str(&deleted);
-                        if i < count - 1 {
-                            content.push('\n');
-                        }
+                        edits.push(Edit {
+                            edit_type: EditType::DeleteLine {
+                                line: s_line,
+                                text: deleted,
+                            },
+                            cursor_before,
+                            cursor_after: self.engine.state.cursor,
+                            modification_count: mod_count,
+                        });
                     }
                     self.engine.register.set('"', &content);
                     (s_line.min(self.engine.buffer.line_count()), 0)
@@ -243,14 +255,46 @@ impl Editor {
                     let e_line = start.line.max(self.engine.state.cursor.line);
                     let s_col = start.col.min(self.engine.state.cursor.col);
                     let e_col = start.col.max(self.engine.state.cursor.col);
-                    let content = self
-                        .engine
-                        .buffer
-                        .delete_block_range(s_line, s_col, e_line, e_col);
+
+                    // Record one deletion per line so undo can restore the
+                    // rectangle without inserting stray newlines.
+                    for line_num in s_line..=e_line {
+                        let chars = self.engine.buffer.line_chars(line_num);
+                        let end = (e_col + 1).min(chars.len());
+                        if s_col < end {
+                            edits.push(Edit {
+                                edit_type: EditType::Delete {
+                                    line: line_num,
+                                    col: s_col,
+                                    text: chars[s_col..end].iter().collect(),
+                                },
+                                cursor_before,
+                                cursor_after: self.engine.state.cursor,
+                                modification_count: mod_count,
+                            });
+                        }
+                    }
+
+                    let content =
+                        self.engine
+                            .buffer
+                            .delete_block_range(s_line, s_col, e_line, e_col + 1);
                     self.engine.register.set('"', &content);
                     (s_line, s_col)
                 }
             };
+
+            // A visual delete is one undo step regardless of how many lines
+            // were touched.
+            if !edits.is_empty() {
+                self.engine.undo_manager.push(Edit {
+                    edit_type: EditType::Group { edits },
+                    cursor_before,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                });
+            }
+
             self.engine.state.cursor.line = cursor_line;
             self.engine.state.cursor.col = cursor_col;
             self.on_buffer_modified();

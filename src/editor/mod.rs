@@ -334,15 +334,22 @@ impl Editor {
         // Clear transient message on next key press (Vim-like behaviour).
         self.engine.state.clear_message();
 
+        // ── Pending confirmation (y/n) ──
+        // Must run before any mode-specific handler: the prompt is shown while
+        // the editor is in Normal mode, where `y` would otherwise be parsed as
+        // the yank operator.
+        if self.engine.state.has_confirmation() {
+            self.handle_confirmation(key).await;
+            return;
+        }
+
         // ── Dashboard mode intercept ──
         // If the dashboard is shown, intercept keys here before the keymap
         // handler gets involved.
-        if self.engine.state.show_dashboard {
-            if self.handle_dashboard_key(key) {
-                return;
-            }
-            // Key not consumed (fall-through): dashboard was dismissed,
-            // continue to normal key processing below.
+        // Key not consumed (fall-through): dashboard was dismissed, so
+        // continue to normal key processing below.
+        if self.engine.state.show_dashboard && self.handle_dashboard_key(key) {
+            return;
         }
 
         let keymap_handler = Rc::clone(&self.keymap_handler);
@@ -383,9 +390,7 @@ impl Editor {
                     Ok(cwd) => {
                         let path = cwd.to_string_lossy().to_string();
                         if let Err(e) = self.engine.buffer_open_dir(&path) {
-                            self.engine
-                                .state
-                                .push_message(MessageLevel::Error, e);
+                            self.engine.state.push_message(MessageLevel::Error, e);
                         }
                     }
                     Err(e) => {
@@ -416,15 +421,16 @@ impl Editor {
                                 files.len(),
                                 files.join(", ")
                             );
-                            self.engine
-                                .state
-                                .push_message(MessageLevel::Info, msg);
+                            self.engine.state.push_message(MessageLevel::Info, msg);
                         }
                     }
                     Err(stderr) => {
                         self.engine.state.push_message(
                             MessageLevel::Info,
-                            format!("Not a git repository (run :e <path> to open a file): {}", stderr),
+                            format!(
+                                "Not a git repository (run :e <path> to open a file): {}",
+                                stderr
+                            ),
                         );
                     }
                 }
@@ -554,13 +560,21 @@ impl Editor {
     /// Saves the current keymap so it can be restored on exit, sets up mock
     /// diff data (Phase 1), and switches to the ReviewKeymap handler.
     pub(crate) fn enter_review_mode(&mut self, args: ReviewArgs) {
+        // Never fabricate a diff: a mock review looks like real data and
+        // silently misleads. Report why it failed and stay in the current mode.
+        let state = match crate::review::diff::try_get_review_state(&args) {
+            Ok(state) => state,
+            Err(reason) => {
+                self.engine
+                    .state
+                    .push_message(MessageLevel::Error, format!("review: {}", reason));
+                self.needs_render = true;
+                return;
+            }
+        };
+
         // Save the current keymap for restoration on exit.
         self.saved_keymap = Some(self.current_keymap);
-
-        // Try real git diff first; fall back to mock data.
-        let state = crate::review::diff::try_get_review_state(&args)
-            .unwrap_or_else(|| crate::review::mock::create_mock_review_state(args));
-
         self.engine.review_state = Some(state);
 
         // Switch to review keymap
@@ -610,6 +624,13 @@ mod tests {
     use crate::types::{ConfirmAction, Keymap};
     use crossterm::event::{KeyCode, KeyModifiers};
 
+    /// Make the buffer dirty by performing a real edit, so tests exercise the
+    /// same path as user input (the core crate no longer exposes a
+    /// test-only dirty setter).
+    fn mark_dirty(editor: &mut Editor) {
+        editor.engine.buffer.insert_char(1, 0, 'x');
+    }
+
     fn test_editor(keymap: Keymap) -> Editor {
         let terminal = Terminal::new().expect("terminal");
         let buffer = TextBuffer::new();
@@ -632,6 +653,7 @@ mod tests {
             show_line_numbers: true,
             show_relative_numbers: false,
             hlsearch: true,
+            search_pattern: None,
             wrap: true,
             mark: None,
             region_active: false,
@@ -661,7 +683,7 @@ mod tests {
     #[test]
     fn dirty_quit_confirmation_message_matches_expected() {
         let mut editor = test_editor(Keymap::Vim);
-        editor.engine.buffer.force_dirty(true);
+        mark_dirty(&mut editor);
 
         editor.handle_quit();
 
@@ -681,7 +703,7 @@ mod tests {
     #[test]
     fn emacs_quit_uses_same_dirty_confirmation_flow_as_vim() {
         let mut editor = test_editor(Keymap::Emacs);
-        editor.engine.buffer.force_dirty(true);
+        mark_dirty(&mut editor);
 
         editor.handle_quit();
 
@@ -693,7 +715,7 @@ mod tests {
     #[tokio::test]
     async fn emacs_ctrl_x_ctrl_c_triggers_same_quit_path() {
         let mut editor = test_editor(Keymap::Emacs);
-        editor.engine.buffer.force_dirty(true);
+        mark_dirty(&mut editor);
 
         editor
             .handle_key_for_test(KeyCode::Char('x'), KeyModifiers::CONTROL)
@@ -709,7 +731,7 @@ mod tests {
     #[tokio::test]
     async fn emacs_dirty_quit_confirmation_accept_exits_editor() {
         let mut editor = test_editor(Keymap::Emacs);
-        editor.engine.buffer.force_dirty(true);
+        mark_dirty(&mut editor);
 
         editor
             .handle_key_for_test(KeyCode::Char('x'), KeyModifiers::CONTROL)
@@ -731,7 +753,7 @@ mod tests {
     #[tokio::test]
     async fn emacs_clean_quit_exits_immediately() {
         let mut editor = test_editor(Keymap::Emacs);
-        editor.engine.buffer.force_dirty(false);
+        // Buffer starts clean.
 
         editor
             .handle_key_for_test(KeyCode::Char('x'), KeyModifiers::CONTROL)
@@ -905,7 +927,9 @@ mod tests {
         editor.set_buffer_for_test("hello world foo\n");
         editor.engine.state.cursor.col = 0;
         editor.handle_normal(KeyCode::Char('w')).await;
-        assert_eq!(editor.engine.state.cursor.col, 5);
+        // `forward-word` lands on the start of the next word, not on the
+        // blank that separates them.
+        assert_eq!(editor.engine.state.cursor.col, 6);
     }
 
     #[tokio::test]
