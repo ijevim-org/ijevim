@@ -999,7 +999,10 @@ mod tests {
 
     #[test]
     fn search_ranges_are_literal_and_non_overlapping() {
-        assert_eq!(search_match_ranges("foo bar foo", "foo"), vec![(0, 3), (8, 11)]);
+        assert_eq!(
+            search_match_ranges("foo bar foo", "foo"),
+            vec![(0, 3), (8, 11)]
+        );
         assert_eq!(search_match_ranges("aaaa", "aa"), vec![(0, 2), (2, 4)]);
         assert_eq!(search_match_ranges("foo", ""), Vec::new());
         assert_eq!(search_match_ranges("foo", "foobar"), Vec::new());
@@ -1009,7 +1012,10 @@ mod tests {
     #[test]
     fn search_ranges_track_multibyte_chars() {
         // Columns are character indices, not bytes.
-        assert_eq!(search_match_ranges("あいう あい", "あい"), vec![(0, 2), (4, 6)]);
+        assert_eq!(
+            search_match_ranges("あいう あい", "あい"),
+            vec![(0, 2), (4, 6)]
+        );
     }
 
     /// Tabs must not wrap a line that fits once expanded.

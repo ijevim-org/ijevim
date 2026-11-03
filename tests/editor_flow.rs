@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ijevim::editor::Editor;
-use ijevim::types::{Keymap, Mode, PendingOperator, VisualType};
+use ijevim::types::{Keymap, Mode, PendingOperator, SearchDirection, VisualType};
 
 fn test_vim_editor(text: &str) -> Editor {
     let mut editor = Editor::new_headless_for_test(Keymap::Vim).expect("headless editor");
@@ -1949,4 +1949,33 @@ async fn nohlsearch_disables_the_highlight() {
 
     run_command(&mut ed, "set hlsearch").await;
     assert!(ed.engine.state.hlsearch, "`set hlsearch` must re-enable it");
+}
+
+#[tokio::test]
+async fn slash_starts_a_forward_search_and_n_repeats() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    assert_eq!(ed.engine.state.mode, Mode::Normal);
+    assert_eq!(ed.engine.search_state.direction, SearchDirection::Forward);
+    assert_eq!(ed.engine.search_state.results.len(), 2);
+
+    let first = ed.snapshot_for_test().2;
+    press_key(&mut ed, KeyCode::Char('n')).await;
+    let second = ed.snapshot_for_test().2;
+    assert_ne!(first, second, "n must jump to the next match");
+}
+
+#[tokio::test]
+async fn question_mark_starts_a_backward_search() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    press_key(&mut ed, KeyCode::Char('?')).await;
+    type_keys(&mut ed, "foo").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    assert_eq!(ed.engine.search_state.direction, SearchDirection::Backward);
+    assert_eq!(ed.engine.state.search_pattern.as_deref(), Some("foo"));
+    assert_eq!(ed.engine.search_state.results.len(), 2);
 }

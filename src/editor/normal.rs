@@ -297,12 +297,19 @@ impl Editor {
                 }
                 self.needs_render = true;
             }
-            KeyCode::Char('?') => {
+            // `/` was missing entirely, so Vim-mode search could only be
+            // reached through `?` (backwards) or the Emacs keymap.
+            KeyCode::Char('/') | KeyCode::Char('?') => {
                 let prev_mode = self.engine.state.mode;
                 self.engine.state.mode = Mode::Command;
                 self.engine.state.command_buffer.clear();
                 self.engine.state.command_cursor_pos = 0;
-                self.engine.state.command_buffer.push('?');
+                if let KeyCode::Char(c) = key {
+                    self.engine.state.command_buffer.push(c);
+                    // The prefix is already typed: later keys must append
+                    // after it, not at position 0.
+                    self.engine.state.command_cursor_pos = self.engine.state.command_buffer.len();
+                }
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
                     from: prev_mode,
                     to: Mode::Command,
