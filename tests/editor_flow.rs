@@ -1979,3 +1979,97 @@ async fn question_mark_starts_a_backward_search() {
     assert_eq!(ed.engine.state.search_pattern.as_deref(), Some("foo"));
     assert_eq!(ed.engine.search_state.results.len(), 2);
 }
+
+// ── Review mode must use real git data (B28) ────────────────────────
+
+#[tokio::test]
+async fn review_enters_mode_from_a_real_repository() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+
+    assert!(
+        ed.engine.review_state.is_some(),
+        ":review inside a git checkout must build a review state from git"
+    );
+}
+
+#[tokio::test]
+async fn review_reports_git_failures_instead_of_mocking() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review deadbeef").await;
+
+    assert!(
+        ed.engine.review_state.is_none(),
+        "a failed git diff must not fabricate review data"
+    );
+    assert!(
+        ed.engine
+            .state
+            .message_history
+            .iter()
+            .any(|m| m.text.contains("review:")),
+        "the failure reason must be reported: {:?}",
+        ed.engine
+            .state
+            .message_history
+            .iter()
+            .map(|m| m.text.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ── :substitute ranges and replacement syntax (B19) ─────────────────
+
+#[tokio::test]
+async fn substitute_supports_ampersand_for_the_whole_match() {
+    let mut ed = test_vim_editor("foo bar foo\n");
+    run_command(&mut ed, "%s/foo/<&>/g").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "<foo> bar <foo>\n");
+}
+
+#[tokio::test]
+async fn substitute_supports_capture_group_backreferences() {
+    let mut ed = test_vim_editor("ab\n");
+    run_command(&mut ed, r"%s/(a)(b)/\2\1/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "ba\n");
+}
+
+#[tokio::test]
+async fn substitute_respects_a_line_range() {
+    let mut ed = test_vim_editor("x\nx\nx\n");
+    run_command(&mut ed, "1,2s/x/y/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "y\ny\nx\n");
+}
+
+#[tokio::test]
+async fn substitute_supports_the_last_line_address() {
+    let mut ed = test_vim_editor("x\nx\n");
+    // `$` is the final buffer line; the trailing empty line is line 3.
+    run_command(&mut ed, "2s/x/y/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "x\ny\n");
+}
+
+#[tokio::test]
+async fn substitute_reports_an_invalid_range() {
+    let mut ed = test_vim_editor("x\n");
+    run_command(&mut ed, "1,xs/x/y/").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "x\n", "an invalid range must not modify the buffer");
+    assert!(
+        ed.engine
+            .state
+            .message_history
+            .iter()
+            .any(|m| m.text.contains("Invalid range")),
+        "the range error must be reported"
+    );
+}

@@ -560,13 +560,21 @@ impl Editor {
     /// Saves the current keymap so it can be restored on exit, sets up mock
     /// diff data (Phase 1), and switches to the ReviewKeymap handler.
     pub(crate) fn enter_review_mode(&mut self, args: ReviewArgs) {
+        // Never fabricate a diff: a mock review looks like real data and
+        // silently misleads. Report why it failed and stay in the current mode.
+        let state = match crate::review::diff::try_get_review_state(&args) {
+            Ok(state) => state,
+            Err(reason) => {
+                self.engine
+                    .state
+                    .push_message(MessageLevel::Error, format!("review: {}", reason));
+                self.needs_render = true;
+                return;
+            }
+        };
+
         // Save the current keymap for restoration on exit.
         self.saved_keymap = Some(self.current_keymap);
-
-        // Try real git diff first; fall back to mock data.
-        let state = crate::review::diff::try_get_review_state(&args)
-            .unwrap_or_else(|| crate::review::mock::create_mock_review_state(args));
-
         self.engine.review_state = Some(state);
 
         // Switch to review keymap
