@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- README: generated dependency tables (runtime / optional / development, with
+  versions, licensing and transitive crate counts). Regenerate with
+  `scripts/deps-table.sh --write`; CI verifies it via `--check`.
 - README: added CLI usage examples (`nestvim vim`, `nestvim emacs`, `nestvim <file>`).
 - README: added link to keybinding specification document.
 - README: added limitations section for currently unimplemented features.
