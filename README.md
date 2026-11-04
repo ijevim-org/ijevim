@@ -48,6 +48,53 @@ cargo run -- [file]
 cargo test
 ```
 
+## Dependencies
+
+<!-- deps:start -->
+Direct dependencies only. Transitive crate counts include the workspace crates.
+
+| Scope | crates in graph |
+| --- | --- |
+| Default build | 56 |
+| `--all-features` | 88 |
+| Default + dev-dependencies | 94 |
+
+### Runtime
+
+| Crate | Version | Used by | License |
+| --- | --- | --- | --- |
+| [crossterm](https://crates.io/crates/crossterm) | 0.29.0 | `ijevim`, `ijevim-tui` | MIT |
+| [regex](https://crates.io/crates/regex) | 1.12.3 | `ijevim`, `ijevim-core` | MIT OR Apache-2.0 |
+| [ropey](https://crates.io/crates/ropey) | 1.6.1 | `ijevim-core` | MIT |
+| [thiserror](https://crates.io/crates/thiserror) | 2.0.18 | `ijevim-core` | MIT OR Apache-2.0 |
+| [tokio](https://crates.io/crates/tokio) | 1.53.3 | `ijevim`, `ijevim-core` | MIT |
+| [toml](https://crates.io/crates/toml) | 0.8.23 | `ijevim-core` | MIT OR Apache-2.0 |
+| [unicode-width](https://crates.io/crates/unicode-width) | 0.2.2 | `ijevim-tui` | MIT OR Apache-2.0 |
+
+### Optional
+
+Only compiled when the matching cargo feature is enabled.
+
+| Crate | Version | Used by | License |
+| --- | --- | --- | --- |
+| [libloading](https://crates.io/crates/libloading) | 0.8.9 | `ijevim-plugin` | ISC |
+| [mlua](https://crates.io/crates/mlua) | 0.9.9 | `ijevim-plugin` | MIT |
+| [quickjs-rusty](https://crates.io/crates/quickjs-rusty) | 0.11.1 | `ijevim-plugin` | MIT |
+| [rust_lisp](https://crates.io/crates/rust_lisp) | 0.18.0 | `ijevim-plugin` | MIT |
+| [serde_json](https://crates.io/crates/serde_json) | 1.0.150 | `ijevim-plugin` | MIT OR Apache-2.0 |
+| [syntect](https://crates.io/crates/syntect) | 5.3.0 | `ijevim-highlight` | MIT |
+
+### Development
+
+| Crate | Version | Used by | License |
+| --- | --- | --- | --- |
+| [criterion](https://crates.io/crates/criterion) | 0.5.1 | `ijevim` | Apache-2.0 OR MIT |
+| [tempfile](https://crates.io/crates/tempfile) | 3.27.0 | `ijevim` | MIT OR Apache-2.0 |
+
+All licenses are permissive (MIT, Apache-2.0, ISC, BSD, Unlicense, Zlib, 0BSD,
+Unicode-3.0). No copyleft license appears in the dependency graph.
+<!-- deps:end -->
+
 ## License
 
 MIT
