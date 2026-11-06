@@ -114,7 +114,16 @@ impl KeymapHandler for VimKeymap {
                         }
                         _ => {}
                     },
-                    Mode::Command | Mode::Visual => {}
+                    Mode::Visual => match key {
+                        KeyCode::Char('v') => {
+                            editor.engine.state.visual_type =
+                                Some(crate::types::VisualType::Block);
+                            editor.needs_render = true;
+                            return;
+                        }
+                        _ => {}
+                    },
+                    Mode::Command => {}
                 }
             }
 

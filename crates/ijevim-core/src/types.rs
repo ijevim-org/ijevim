@@ -525,6 +525,7 @@ pub struct EditorState {
     pub visual_start: Option<Position>,
     pub visual_type: Option<VisualType>,
     pub last_visual_start: Option<Position>,
+    pub last_visual_end: Option<Position>,
     pub last_visual_type: Option<VisualType>,
     pub marks: Marks,
     pub macros: Macros,
@@ -550,6 +551,10 @@ pub struct EditorState {
     pub message_history: VecDeque<EditorMessage>,
     /// Show the welcome dashboard instead of an empty buffer.
     pub show_dashboard: bool,
+    /// Current incremental-search match: (line, start_col, end_col exclusive).
+    pub incsearch_match: Option<(usize, usize, usize)>,
+    /// Extra hint appended to the command line (search count, completion).
+    pub command_hint: Option<String>,
 }
 
 impl Default for EditorState {
@@ -565,6 +570,7 @@ impl Default for EditorState {
             visual_start: None,
             visual_type: None,
             last_visual_start: None,
+            last_visual_end: None,
             last_visual_type: None,
             marks: Marks::new(),
             macros: Macros::new(),
@@ -582,6 +588,8 @@ impl Default for EditorState {
             scrolloff: 0,
             message_history: VecDeque::new(),
             show_dashboard: false,
+            incsearch_match: None,
+            command_hint: None,
         }
     }
 }

@@ -1,4 +1,5 @@
 pub(crate) mod cmd;
+pub(crate) mod cmd_complete;
 pub(crate) mod emacs_ops;
 pub(crate) mod insert;
 pub(crate) mod macro_marks;
@@ -16,7 +17,10 @@ use crate::plugin::PluginManager;
 use crate::renderer::Renderer;
 use crate::review::ReviewArgs;
 use crate::terminal::Terminal;
-use crate::types::{EditorState, Keymap, MessageLevel, Mode, Position, Result};
+use crate::state::SearchState;
+use crate::types::{
+    EditorState, Keymap, MessageLevel, Mode, Position, Result, SearchDirection, SearchResult,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::cell::RefCell;
 #[allow(unused_imports)]
@@ -24,6 +28,27 @@ use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+/// State for a Tab-completion cycle in the command line.
+pub(crate) struct CompletionSession {
+    /// Byte offset where the completed token starts.
+    pub start: usize,
+    /// Buffer contents before the first Tab, used to detect a stale session.
+    pub base: String,
+    pub candidates: Vec<String>,
+    pub index: usize,
+}
+
+/// State for the incremental search preview while typing `/` or `?`.
+pub(crate) struct SearchPreview {
+    pub origin: Position,
+    pub direction: SearchDirection,
+    pub pattern: String,
+    pub prev_pattern: Option<String>,
+    pub prev_search: SearchState,
+    pub results: Vec<SearchResult>,
+    pub current_idx: usize,
+}
 
 pub struct Editor {
     pub engine: Engine,
@@ -42,6 +67,18 @@ pub struct Editor {
     current_keymap: Keymap,
     /// Keymap to restore when exiting review mode.
     saved_keymap: Option<Keymap>,
+    /// Command-line history (`:` commands).
+    pub(crate) command_history: Vec<String>,
+    /// Search-pattern history (`/` and `?`).
+    pub(crate) search_history: Vec<String>,
+    /// Current position while browsing history; `None` means editing a draft.
+    pub(crate) history_index: Option<usize>,
+    /// Draft line preserved while browsing history.
+    pub(crate) history_draft: String,
+    /// Active Tab-completion cycle.
+    pub(crate) completion_session: Option<CompletionSession>,
+    /// Active incremental-search preview.
+    pub(crate) search_preview: Option<SearchPreview>,
 }
 
 impl Editor {
@@ -98,6 +135,12 @@ impl Editor {
             last_scroll_cursor_line: 0,
             current_keymap: keymap,
             saved_keymap: None,
+            command_history: Vec::new(),
+            search_history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
+            completion_session: None,
+            search_preview: None,
         }
     }
 
@@ -646,6 +689,7 @@ mod tests {
             visual_start: None,
             visual_type: None,
             last_visual_start: None,
+            last_visual_end: None,
             last_visual_type: None,
             marks: crate::types::Marks::new(),
             macros: crate::types::Macros::new(),
@@ -663,6 +707,8 @@ mod tests {
             scrolloff: 0,
             message_history: VecDeque::new(),
             show_dashboard: false,
+            incsearch_match: None,
+            command_hint: None,
         };
 
         Editor {
@@ -677,6 +723,12 @@ mod tests {
             last_scroll_cursor_line: 0,
             current_keymap: keymap,
             saved_keymap: None,
+            command_history: Vec::new(),
+            search_history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
+            completion_session: None,
+            search_preview: None,
         }
     }
 

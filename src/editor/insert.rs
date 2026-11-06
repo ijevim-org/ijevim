@@ -246,6 +246,16 @@ impl Editor {
     pub(crate) async fn handle_replace(&mut self, key: KeyCode) {
         match key {
             KeyCode::Esc => {
+                if self.engine.operator_state.replace_char == Some('\0')
+                    && self.engine.state.visual_start.is_some()
+                {
+                    self.engine.operator_state.replace_char = None;
+                    self.engine.state.visual_start = None;
+                    self.engine.state.visual_type = None;
+                    self.transition_mode(Mode::Normal);
+                    self.needs_render = true;
+                    return;
+                }
                 // Flush accumulated Replace mode edits as a single undo group.
                 if !self.engine.replace_undo_group.is_empty() {
                     let edits = std::mem::take(&mut self.engine.replace_undo_group);
@@ -264,6 +274,9 @@ impl Editor {
             KeyCode::Char(c) => {
                 // ── Single-char replace (r{char}) ─────────────────
                 if self.engine.operator_state.replace_char == Some('\0') {
+                    if self.engine.state.visual_start.is_some() {
+                        return self.visual_replace_char(c);
+                    }
                     return self.handle_replace_inline_char(c);
                 }
 
@@ -305,6 +318,9 @@ impl Editor {
             KeyCode::Enter => {
                 // Enter during single-char replace acts like Char('\n')
                 if self.engine.operator_state.replace_char == Some('\0') {
+                    if self.engine.state.visual_start.is_some() {
+                        return self.visual_replace_char('\n');
+                    }
                     return self.handle_replace_inline_char('\n');
                 }
                 let line = self.engine.state.cursor.line;

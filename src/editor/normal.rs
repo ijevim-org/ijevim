@@ -1008,7 +1008,7 @@ impl Editor {
                     ) {
                         self.engine.state.visual_start = Some(start);
                         self.engine.state.visual_type = Some(vtype);
-                        self.engine.state.cursor = start;
+                        self.engine.state.cursor = self.engine.state.last_visual_end.unwrap_or(start);
                         let prev_mode = self.engine.state.mode;
                         self.engine.state.mode = Mode::Visual;
                         self.engine.plugin_manager.emit(PluginEvent::ModeChange {
@@ -1047,7 +1047,7 @@ impl Editor {
     }
 
     /// Enter Insert mode after a `c{motion}` deletion.
-    fn enter_insert_after_change(&mut self) {
+    pub(crate) fn enter_insert_after_change(&mut self) {
         self.engine.insert_state.accum.clear();
         self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
         let prev_mode = self.engine.state.mode;
@@ -1060,7 +1060,7 @@ impl Editor {
     }
 
     /// Content length of a line, excluding its trailing newline.
-    fn line_content_len(&self, line: usize) -> usize {
+    pub(crate) fn line_content_len(&self, line: usize) -> usize {
         self.engine
             .buffer
             .get_line(line)
@@ -1070,7 +1070,7 @@ impl Editor {
     }
 
     /// Delete the character range `[start, end)` on the cursor line.
-    fn delete_cols(&mut self, register: char, start: usize, end: usize) {
+    pub(crate) fn delete_cols(&mut self, register: char, start: usize, end: usize) {
         if let Some(edit) = self.delete_cols_edit(register, start, end) {
             self.engine.undo_manager.push(edit);
         }
@@ -1080,7 +1080,7 @@ impl Editor {
     ///
     /// Multi-step operators (`3dw`, `dj`, ...) collect the entries and push
     /// them as one group, so the single `u` a user expects restores them all.
-    fn delete_cols_edit(&mut self, register: char, start: usize, end: usize) -> Option<Edit> {
+    pub(crate) fn delete_cols_edit(&mut self, register: char, start: usize, end: usize) -> Option<Edit> {
         let line = self.engine.state.cursor.line;
         let (start, end) = (start.min(end), start.max(end));
         let end = end.min(self.line_content_len(line));
@@ -1113,7 +1113,7 @@ impl Editor {
     }
 
     /// Yank the character range `[start, end)` on the cursor line.
-    fn yank_cols(&mut self, register: char, start: usize, end: usize) {
+    pub(crate) fn yank_cols(&mut self, register: char, start: usize, end: usize) {
         let line = self.engine.state.cursor.line;
         let end = end.min(self.line_content_len(line));
         let (start, end) = (start.min(end), start.max(end));
@@ -1126,7 +1126,7 @@ impl Editor {
     }
 
     /// Delete whole lines `start_line..=end_line` as a single undo step.
-    fn delete_lines_range(&mut self, register: char, start_line: usize, end_line: usize) {
+    pub(crate) fn delete_lines_range(&mut self, register: char, start_line: usize, end_line: usize) {
         let line_count = self.engine.buffer.line_count();
         let start = start_line.max(1).min(line_count);
         let end = end_line.max(1).min(line_count);
@@ -1155,7 +1155,7 @@ impl Editor {
     }
 
     /// Yank whole lines `start_line..=end_line` into `register`.
-    fn yank_lines_range(&mut self, register: char, start_line: usize, end_line: usize) {
+    pub(crate) fn yank_lines_range(&mut self, register: char, start_line: usize, end_line: usize) {
         let line_count = self.engine.buffer.line_count();
         let start = start_line.max(1).min(line_count);
         let end = end_line.max(1).min(line_count);
@@ -1181,7 +1181,7 @@ impl Editor {
     /// A repeated `w` that lands in column 0 of a later line stops at the end
     /// of the previous line: the line break is only part of the motion when
     /// the target is further into the line.
-    fn exclusive_target(&self, from_line: usize, target: (usize, usize)) -> (usize, usize) {
+    pub(crate) fn exclusive_target(&self, from_line: usize, target: (usize, usize)) -> (usize, usize) {
         let (line, col) = target;
         if line > from_line && col == 0 {
             (line - 1, self.line_content_len(line - 1))
@@ -1191,7 +1191,7 @@ impl Editor {
     }
 
     /// Target of `{count}w` / `{count}e`, honoring the count across lines.
-    fn word_motion_target(&self, count: usize, big: bool, to_word_end: bool) -> (usize, usize) {
+    pub(crate) fn word_motion_target(&self, count: usize, big: bool, to_word_end: bool) -> (usize, usize) {
         let (mut line, mut col) = (self.engine.state.cursor.line, self.engine.state.cursor.col);
         for _ in 0..count.max(1) {
             let next = if to_word_end {
@@ -1209,7 +1209,7 @@ impl Editor {
     }
 
     /// Target of `{count}b` / `{count}B`, crossing lines.
-    fn word_backward_target(&self, count: usize, big: bool) -> (usize, usize) {
+    pub(crate) fn word_backward_target(&self, count: usize, big: bool) -> (usize, usize) {
         let (mut line, mut col) = (self.engine.state.cursor.line, self.engine.state.cursor.col);
         for _ in 0..count.max(1) {
             let next = self.word_backward_pos(line, col, big);
@@ -1223,7 +1223,7 @@ impl Editor {
     }
 
     /// `cc` / `S`: clear `count` lines and leave a single empty line behind.
-    fn change_lines(&mut self, register: char, count: usize) {
+    pub(crate) fn change_lines(&mut self, register: char, count: usize) {
         let start = self.engine.state.cursor.line;
         let mut edits = Vec::new();
         for _ in 1..count.max(1) {
@@ -1242,7 +1242,7 @@ impl Editor {
     }
 
     /// `cj` / `ck` / `cG`: delete whole lines, keep one empty line, insert.
-    fn change_line_range(&mut self, register: char, first: usize, last: usize) {
+    pub(crate) fn change_line_range(&mut self, register: char, first: usize, last: usize) {
         let first = first.max(1);
         let last = last.max(first).min(self.engine.buffer.content_line_count());
         self.engine.state.cursor.line = first;
@@ -1272,7 +1272,7 @@ impl Editor {
     }
 
     /// Delete an arbitrary charwise span, joining lines when it crosses one.
-    fn delete_span(&mut self, register: char, from: (usize, usize), to: (usize, usize)) {
+    pub(crate) fn delete_span(&mut self, register: char, from: (usize, usize), to: (usize, usize)) {
         if let Some(edit) = self.delete_span_edit(register, from, to) {
             self.engine.undo_manager.push(edit);
         }
@@ -1316,7 +1316,7 @@ impl Editor {
     }
 
     /// Yank an arbitrary charwise span.
-    fn yank_span(&mut self, register: char, from: (usize, usize), to: (usize, usize)) {
+    pub(crate) fn yank_span(&mut self, register: char, from: (usize, usize), to: (usize, usize)) {
         if from >= to {
             return;
         }
@@ -1350,7 +1350,7 @@ impl Editor {
     ///
     /// Callers that delete several lines (e.g. `3dd`) collect the entries and
     /// push them as one [`EditType::Group`].
-    fn delete_line_edit(&mut self, register: char) -> Option<Edit> {
+    pub(crate) fn delete_line_edit(&mut self, register: char) -> Option<Edit> {
         let line = self.engine.state.cursor.line;
         let mod_count = self.engine.buffer.modification_count();
         let content = self.engine.buffer.delete_line(line);
@@ -1405,7 +1405,7 @@ impl Editor {
     /// The trailing blanks belong to the motion; without them the next word
     /// would stay glued to whatever follows. When no further word exists the
     /// delete runs to the end of the line.
-    fn delete_word(&mut self, register: char, count: usize, big: bool) {
+    pub(crate) fn delete_word(&mut self, register: char, count: usize, big: bool) {
         let from = (self.engine.state.cursor.line, self.engine.state.cursor.col);
         let target = self.word_motion_target(count, big, false);
         let target = self.exclusive_target(from.0, target);
@@ -1413,7 +1413,7 @@ impl Editor {
     }
 
     /// `de` / `dE`: delete through the end of the word, inclusive.
-    fn delete_word_end(&mut self, register: char, count: usize, big: bool) {
+    pub(crate) fn delete_word_end(&mut self, register: char, count: usize, big: bool) {
         let from = (self.engine.state.cursor.line, self.engine.state.cursor.col);
         let (line, col) = self.word_motion_target(count, big, true);
         self.delete_span(register, from, (line, col + 1));
@@ -1421,7 +1421,7 @@ impl Editor {
 
     /// `cw` / `cW`: change to the end of the word, or behave like `dw` when the
     /// cursor sits on blanks (Vim's documented special case).
-    fn change_word(&mut self, register: char, count: usize, big: bool) {
+    pub(crate) fn change_word(&mut self, register: char, count: usize, big: bool) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
         let on_blank = self
@@ -1491,7 +1491,7 @@ impl Editor {
     }
 
     /// Toggle case of character under cursor (`~`).
-    fn toggle_case_char(&mut self) {
+    pub(crate) fn toggle_case_char(&mut self) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
         let line_str = self.engine.buffer.get_line(line);
@@ -1525,7 +1525,7 @@ impl Editor {
         self.on_buffer_modified();
     }
 
-    fn delete_char(&mut self, register: char) {
+    pub(crate) fn delete_char(&mut self, register: char) {
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
         let line_str = self.engine.buffer.get_line(line);
