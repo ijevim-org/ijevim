@@ -252,6 +252,8 @@ impl Editor {
                 let prev_mode = self.engine.state.mode;
                 self.engine.state.mode = Mode::Command;
                 self.engine.state.command_buffer.clear();
+                self.engine.state.command_cursor_pos = 0;
+                self.reset_command_line_nav();
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
                     from: prev_mode,
                     to: Mode::Command,
@@ -322,6 +324,12 @@ impl Editor {
             // reached through `?` (backwards) or the Emacs keymap.
             KeyCode::Char('/') | KeyCode::Char('?') => {
                 let prev_mode = self.engine.state.mode;
+                let direction = if key == KeyCode::Char('?') {
+                    crate::types::SearchDirection::Backward
+                } else {
+                    crate::types::SearchDirection::Forward
+                };
+                self.begin_search_command(direction);
                 self.engine.state.mode = Mode::Command;
                 self.engine.state.command_buffer.clear();
                 self.engine.state.command_cursor_pos = 0;

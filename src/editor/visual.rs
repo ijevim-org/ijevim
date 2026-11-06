@@ -540,6 +540,7 @@ impl Editor {
             // ── Visual command line ─────────────────────────────────
             KeyCode::Char(':') => {
                 self.save_visual_selection();
+                self.reset_command_line_nav();
                 self.engine.state.command_buffer = "'<,'>".to_string();
                 self.engine.state.command_cursor_pos = self.engine.state.command_buffer.len();
                 self.exit_visual(Mode::Command);

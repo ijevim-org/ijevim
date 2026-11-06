@@ -30,6 +30,26 @@ impl Editor {
             }
         }
 
+        // Ctrl-v: insert the next key literally (no completion, no mapping).
+        if self.engine.insert_state.waiting_literal {
+            self.engine.insert_state.waiting_literal = false;
+            let text = match key {
+                KeyCode::Char(c) => c.to_string(),
+                KeyCode::Tab => "\t".to_string(),
+                _ => {
+                    self.needs_render = true;
+                    return;
+                }
+            };
+            let line = self.engine.state.cursor.line;
+            let col = self.engine.state.cursor.col;
+            self.engine.buffer.insert(line, col, &text);
+            self.engine.state.cursor.col += text.chars().count();
+            self.engine.insert_state.accum.push_str(&text);
+            self.on_buffer_modified();
+            return;
+        }
+
         match key {
             KeyCode::Esc => {
                 // Push accumulated insert text as a single undo group
@@ -117,6 +137,19 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    /// Ctrl-t / Ctrl-d in Insert mode: indent or dedent the current line and
+    /// keep the cursor at the same offset within the line.
+    pub(crate) fn insert_indent(&mut self, indent: bool) {
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let before_len = self.engine.buffer.line_content_len(line);
+        self.indent_lines(line, line, indent);
+        let after_len = self.engine.buffer.line_content_len(line);
+        let cursor = (col as isize + (after_len as isize - before_len as isize)).max(0) as usize;
+        self.engine.state.cursor.col = cursor.min(after_len);
+        self.needs_render = true;
     }
 
     /// Delete from cursor to beginning of the current word (Ctrl-w in Insert mode).

@@ -4,6 +4,7 @@ pub(crate) mod emacs_ops;
 pub(crate) mod insert;
 pub(crate) mod macro_marks;
 pub(crate) mod motion;
+pub(crate) mod number;
 pub(crate) mod normal;
 pub(crate) mod search;
 pub(crate) mod text_object;
@@ -33,8 +34,6 @@ use std::time::{Duration, Instant};
 pub(crate) struct CompletionSession {
     /// Byte offset where the completed token starts.
     pub start: usize,
-    /// Buffer contents before the first Tab, used to detect a stale session.
-    pub base: String,
     pub candidates: Vec<String>,
     pub index: usize,
 }
@@ -79,6 +78,10 @@ pub struct Editor {
     pub(crate) completion_session: Option<CompletionSession>,
     /// Active incremental-search preview.
     pub(crate) search_preview: Option<SearchPreview>,
+    /// Set when a command moved the viewport itself; suppresses auto-scroll.
+    pub(crate) viewport_override: bool,
+    /// `Ctrl-o` in Insert mode: the next command runs in Normal mode.
+    pub(crate) one_shot_normal: bool,
 }
 
 impl Editor {
@@ -141,6 +144,8 @@ impl Editor {
             history_draft: String::new(),
             completion_session: None,
             search_preview: None,
+            viewport_override: false,
+            one_shot_normal: false,
         }
     }
 
@@ -292,6 +297,11 @@ impl Editor {
                 }
 
                 if let Some(w) = self.engine.window_layout.windows.get_mut(focused_idx) {
+                    if self.viewport_override {
+                        // An explicit scroll command (Ctrl-e/y, zz/zt/zb) owns
+                        // the viewport for this frame.
+                        self.viewport_override = false;
+                    } else {
                     // Auto-scroll: keep cursor visible.
                     let show_num = self.engine.state.show_line_numbers
                         || self.engine.state.show_relative_numbers;
@@ -348,6 +358,7 @@ impl Editor {
                         }
                         w.scroll_top = new_scroll.max(1);
                         self.needs_render = true;
+                    }
                     }
                 }
             }
@@ -729,6 +740,8 @@ mod tests {
             history_draft: String::new(),
             completion_session: None,
             search_preview: None,
+            viewport_override: false,
+            one_shot_normal: false,
         }
     }
 

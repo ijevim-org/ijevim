@@ -1,5 +1,5 @@
 use crate::editor::{CompletionSession, Editor, SearchPreview};
-use crate::types::{Mode, SearchDirection, SearchResult};
+use crate::types::SearchDirection;
 use std::path::PathBuf;
 
 /// Names accepted by `:` (used only for Tab completion).
@@ -72,7 +72,9 @@ impl Editor {
         self.history_index = None;
         self.history_draft.clear();
         self.completion_session = None;
+        self.search_preview = None;
         self.engine.state.command_hint = None;
+        self.engine.state.incsearch_match = None;
     }
 
     /// Start an incremental-search preview for `/` or `?`.
@@ -231,7 +233,6 @@ impl Editor {
 
         self.completion_session = Some(CompletionSession {
             start,
-            base: buffer.clone(),
             candidates: candidates.clone(),
             index: 0,
         });
@@ -434,12 +435,6 @@ impl Editor {
         self.needs_render = true;
     }
 
-    /// Recompute the preview after a cursor/history change (no-op when off).
-    pub(crate) fn refresh_search_preview(&mut self) {
-        if self.engine.state.mode == Mode::Command && self.search_preview.is_some() {
-            self.update_search_preview();
-        }
-    }
 }
 
 fn path_candidates(prefix: &str) -> Vec<String> {
@@ -482,6 +477,3 @@ fn expand_tilde(path: &str) -> String {
     }
     path.to_string()
 }
-
-#[allow(dead_code)]
-fn _unused(_: SearchResult) {}

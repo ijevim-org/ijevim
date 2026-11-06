@@ -56,40 +56,91 @@ impl Editor {
         self.needs_render = true;
     }
 
-    pub fn scroll_up_one(&mut self) {
-        if self.engine.state.cursor.line > 1 {
-            self.engine.state.cursor.line -= 1;
-        }
+    /// Height of the focused window in terminal rows.
+    fn active_window_rows(&self) -> usize {
+        self.engine
+            .window_layout
+            .windows
+            .get(self.engine.window_layout.focused)
+            .map(|w| w.row_end.saturating_sub(w.row_start).max(1))
+            .unwrap_or_else(|| (self.terminal.rows() as usize).saturating_sub(2).max(1))
     }
 
-    pub fn scroll_down_one(&mut self) {
-        let line_count = self.engine.buffer.line_count();
-        if self.engine.state.cursor.line < line_count {
-            self.engine.state.cursor.line += 1;
-        }
+    /// Current viewport top line of the focused window.
+    fn current_scroll_top(&self) -> usize {
+        self.engine
+            .window_layout
+            .windows
+            .get(self.engine.window_layout.focused)
+            .map(|w| w.scroll_top.max(1))
+            .unwrap_or(1)
     }
 
-    pub fn scroll_cursor_to_center(&mut self) {
-        let terminal_rows = self.terminal.rows() as usize;
-        let visible_rows = terminal_rows.saturating_sub(2);
-        let scroll_pos = self
+    /// Move the viewport to `top` (1-based), clamped to the buffer.
+    ///
+    /// Viewport moves never drag the cursor past the window edges; the caller
+    /// pulls the cursor along when it would fall off.
+    fn set_viewport_top(&mut self, top: usize) {
+        let rows = self.active_window_rows();
+        let max_top = self
             .engine
-            .state
-            .cursor
-            .line
-            .saturating_sub(visible_rows / 2);
-        self.engine.state.cursor.line = scroll_pos.max(1);
+            .buffer
+            .line_count()
+            .saturating_sub(rows.saturating_sub(1))
+            .max(1);
+        let top = top.clamp(1, max_top);
+        if let Some(w) = self
+            .engine
+            .window_layout
+            .windows
+            .get_mut(self.engine.window_layout.focused)
+        {
+            w.scroll_top = top;
+        }
+        self.viewport_override = true;
+        self.needs_render = true;
     }
 
+    /// `Ctrl-e`: scroll the viewport one line down.
+    pub fn scroll_down_one(&mut self) {
+        let rows = self.active_window_rows();
+        let top = self.current_scroll_top();
+        self.set_viewport_top(top + 1);
+        let top = self.current_scroll_top();
+        let bottom = top + rows.saturating_sub(1);
+        let cursor = &mut self.engine.state.cursor;
+        cursor.line = cursor.line.clamp(top, bottom);
+    }
+
+    /// `Ctrl-y`: scroll the viewport one line up.
+    pub fn scroll_up_one(&mut self) {
+        let rows = self.active_window_rows();
+        let top = self.current_scroll_top();
+        self.set_viewport_top(top.saturating_sub(1));
+        let top = self.current_scroll_top();
+        let bottom = top + rows.saturating_sub(1);
+        let cursor = &mut self.engine.state.cursor;
+        cursor.line = cursor.line.clamp(top, bottom);
+    }
+
+    /// `zz`: center the cursor line in the viewport.
+    pub fn scroll_cursor_to_center(&mut self) {
+        let rows = self.active_window_rows();
+        let line = self.engine.state.cursor.line;
+        self.set_viewport_top(line.saturating_sub(rows / 2));
+    }
+
+    /// `zt`: put the cursor line at the top of the viewport.
     pub fn scroll_cursor_to_top(&mut self) {
-        self.engine.state.cursor.line = 1;
+        let line = self.engine.state.cursor.line;
+        self.set_viewport_top(line);
     }
 
+    /// `zb`: put the cursor line at the bottom of the viewport.
     pub fn scroll_cursor_to_bottom(&mut self) {
-        let terminal_rows = self.terminal.rows() as usize;
-        let visible_rows = terminal_rows.saturating_sub(2);
-        let line_count = self.engine.buffer.line_count();
-        self.engine.state.cursor.line = (line_count.saturating_sub(visible_rows) + 1).max(1);
+        let rows = self.active_window_rows();
+        let line = self.engine.state.cursor.line;
+        self.set_viewport_top(line.saturating_sub(rows.saturating_sub(1)));
     }
 
     pub(crate) fn cursor_right(&mut self, n: usize) {

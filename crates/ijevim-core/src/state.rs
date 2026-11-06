@@ -101,4 +101,6 @@ pub struct InsertState {
     pub start_pos: Option<Position>,
     /// Set by Ctrl-r in insert mode; the next non-modifier key selects a register.
     pub waiting_register: bool,
+    /// Set by Ctrl-v in insert mode; the next key is inserted literally.
+    pub waiting_literal: bool,
 }
