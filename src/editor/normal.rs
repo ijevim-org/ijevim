@@ -524,6 +524,34 @@ impl Editor {
                     self.jump_to_matching_bracket();
                     self.needs_render = true;
                 }
+                KeyCode::Char('{') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.paragraph_backward();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char('}') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.paragraph_forward();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char('(') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.sentence_backward();
+                    }
+                    self.needs_render = true;
+                }
+                KeyCode::Char(')') => {
+                    let count = self.take_count();
+                    for _ in 0..count {
+                        self.sentence_forward();
+                    }
+                    self.needs_render = true;
+                }
                 KeyCode::Char('x') => {
                     let count = self.take_count();
                     for _ in 0..count {
@@ -984,6 +1012,14 @@ impl Editor {
                     self.engine.state.cursor.line = 1;
                     self.engine.state.cursor.col = 0;
                     self.needs_render = true;
+                } else if let KeyCode::Char('e') = key {
+                    for _ in 0..count {
+                        self.move_word_end_backward(false);
+                    }
+                } else if let KeyCode::Char('E') = key {
+                    for _ in 0..count {
+                        self.move_word_end_backward(true);
+                    }
                 } else if let KeyCode::Char('-') = key {
                     // g- : switch to older undo branch
                     if let Some(parent) = self.engine.undo_manager.parent_node() {

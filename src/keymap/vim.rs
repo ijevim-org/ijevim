@@ -31,6 +31,7 @@ impl KeymapHandler for VimKeymap {
             // to Insert. Keep routing to Normal until any pending operator
             // (count, operator, `g`, Ctrl-w) completes.
             if editor.one_shot_normal {
+                editor.one_shot_normal = false;
                 let was_insert = editor.engine.state.mode == Mode::Insert;
                 editor.handle_normal(key).await;
                 let pending = !matches!(
