@@ -56,40 +56,91 @@ impl Editor {
         self.needs_render = true;
     }
 
-    pub fn scroll_up_one(&mut self) {
-        if self.engine.state.cursor.line > 1 {
-            self.engine.state.cursor.line -= 1;
-        }
+    /// Height of the focused window in terminal rows.
+    fn active_window_rows(&self) -> usize {
+        self.engine
+            .window_layout
+            .windows
+            .get(self.engine.window_layout.focused)
+            .map(|w| w.row_end.saturating_sub(w.row_start).max(1))
+            .unwrap_or_else(|| (self.terminal.rows() as usize).saturating_sub(2).max(1))
     }
 
-    pub fn scroll_down_one(&mut self) {
-        let line_count = self.engine.buffer.line_count();
-        if self.engine.state.cursor.line < line_count {
-            self.engine.state.cursor.line += 1;
-        }
+    /// Current viewport top line of the focused window.
+    fn current_scroll_top(&self) -> usize {
+        self.engine
+            .window_layout
+            .windows
+            .get(self.engine.window_layout.focused)
+            .map(|w| w.scroll_top.max(1))
+            .unwrap_or(1)
     }
 
-    pub fn scroll_cursor_to_center(&mut self) {
-        let terminal_rows = self.terminal.rows() as usize;
-        let visible_rows = terminal_rows.saturating_sub(2);
-        let scroll_pos = self
+    /// Move the viewport to `top` (1-based), clamped to the buffer.
+    ///
+    /// Viewport moves never drag the cursor past the window edges; the caller
+    /// pulls the cursor along when it would fall off.
+    fn set_viewport_top(&mut self, top: usize) {
+        let rows = self.active_window_rows();
+        let max_top = self
             .engine
-            .state
-            .cursor
-            .line
-            .saturating_sub(visible_rows / 2);
-        self.engine.state.cursor.line = scroll_pos.max(1);
+            .buffer
+            .line_count()
+            .saturating_sub(rows.saturating_sub(1))
+            .max(1);
+        let top = top.clamp(1, max_top);
+        if let Some(w) = self
+            .engine
+            .window_layout
+            .windows
+            .get_mut(self.engine.window_layout.focused)
+        {
+            w.scroll_top = top;
+        }
+        self.viewport_override = true;
+        self.needs_render = true;
     }
 
+    /// `Ctrl-e`: scroll the viewport one line down.
+    pub fn scroll_down_one(&mut self) {
+        let rows = self.active_window_rows();
+        let top = self.current_scroll_top();
+        self.set_viewport_top(top + 1);
+        let top = self.current_scroll_top();
+        let bottom = top + rows.saturating_sub(1);
+        let cursor = &mut self.engine.state.cursor;
+        cursor.line = cursor.line.clamp(top, bottom);
+    }
+
+    /// `Ctrl-y`: scroll the viewport one line up.
+    pub fn scroll_up_one(&mut self) {
+        let rows = self.active_window_rows();
+        let top = self.current_scroll_top();
+        self.set_viewport_top(top.saturating_sub(1));
+        let top = self.current_scroll_top();
+        let bottom = top + rows.saturating_sub(1);
+        let cursor = &mut self.engine.state.cursor;
+        cursor.line = cursor.line.clamp(top, bottom);
+    }
+
+    /// `zz`: center the cursor line in the viewport.
+    pub fn scroll_cursor_to_center(&mut self) {
+        let rows = self.active_window_rows();
+        let line = self.engine.state.cursor.line;
+        self.set_viewport_top(line.saturating_sub(rows / 2));
+    }
+
+    /// `zt`: put the cursor line at the top of the viewport.
     pub fn scroll_cursor_to_top(&mut self) {
-        self.engine.state.cursor.line = 1;
+        let line = self.engine.state.cursor.line;
+        self.set_viewport_top(line);
     }
 
+    /// `zb`: put the cursor line at the bottom of the viewport.
     pub fn scroll_cursor_to_bottom(&mut self) {
-        let terminal_rows = self.terminal.rows() as usize;
-        let visible_rows = terminal_rows.saturating_sub(2);
-        let line_count = self.engine.buffer.line_count();
-        self.engine.state.cursor.line = (line_count.saturating_sub(visible_rows) + 1).max(1);
+        let rows = self.active_window_rows();
+        let line = self.engine.state.cursor.line;
+        self.set_viewport_top(line.saturating_sub(rows.saturating_sub(1)));
     }
 
     pub(crate) fn cursor_right(&mut self, n: usize) {
@@ -327,77 +378,187 @@ impl Editor {
         self.needs_render = true;
     }
 
+    /// Vim's `f`/`F`/`t`/`T`: they never leave the current line.
     pub(crate) fn find_char(&mut self, ch: char, till: bool, forward: bool) -> bool {
-        let current_line = self.engine.state.cursor.line;
-        let start_col = self.engine.state.cursor.col;
-        let total_lines = self.engine.buffer.line_count();
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let chars = self.engine.buffer.line_chars(line);
+        let len = content_len(&chars);
 
         if forward {
-            // Search from start_col+1 on the current line, then subsequent lines.
-            let chars: Vec<char> = self.engine.buffer.line_chars(current_line);
-            for (i, &c) in chars.iter().enumerate().skip(start_col + 1) {
-                if c == ch {
-                    if till {
-                        self.engine.state.cursor.col = i.saturating_sub(1);
-                    } else {
-                        self.engine.state.cursor.col = i;
-                    }
+            for i in (col + 1)..len {
+                if chars[i] == ch {
+                    self.engine.state.cursor.col = if till { i.saturating_sub(1) } else { i };
                     return true;
-                }
-            }
-            // Not found on current line — search subsequent lines.
-            for line_idx in (current_line + 1)..=total_lines {
-                let chars: Vec<char> = self.engine.buffer.line_chars(line_idx);
-                for (i, &c) in chars.iter().enumerate() {
-                    if c == ch {
-                        self.engine.state.cursor.line = line_idx;
-                        if till {
-                            // `t` forward to next line: place cursor at end of previous line.
-                            if line_idx > 1 {
-                                let prev_chars: Vec<char> =
-                                    self.engine.buffer.line_chars(line_idx - 1);
-                                self.engine.state.cursor.col = prev_chars.len().saturating_sub(1);
-                            } else {
-                                self.engine.state.cursor.col = 0;
-                            }
-                        } else {
-                            self.engine.state.cursor.col = i;
-                        }
-                        return true;
-                    }
                 }
             }
         } else {
-            // Search from start_col-1 on the current line, then preceding lines.
-            let chars: Vec<char> = self.engine.buffer.line_chars(current_line);
-            for i in (0..start_col).rev() {
+            for i in (0..col.min(len)).rev() {
                 if chars[i] == ch {
-                    if till {
-                        self.engine.state.cursor.col = (i + 1).min(chars.len().saturating_sub(1));
-                    } else {
-                        self.engine.state.cursor.col = i;
-                    }
+                    self.engine.state.cursor.col = if till { (i + 1).min(len.saturating_sub(1)) } else { i };
                     return true;
-                }
-            }
-            // Not found on current line — search preceding lines.
-            if current_line > 1 {
-                for line_idx in (1..current_line).rev() {
-                    let chars: Vec<char> = self.engine.buffer.line_chars(line_idx);
-                    if let Some(pos) = chars.iter().rposition(|&c| c == ch) {
-                        self.engine.state.cursor.line = line_idx;
-                        if till {
-                            // `T` backward to preceding line: place cursor at start of next line.
-                            self.engine.state.cursor.col = 0;
-                        } else {
-                            self.engine.state.cursor.col = pos;
-                        }
-                        return true;
-                    }
                 }
             }
         }
         false
+    }
+
+    /// Vim's `ge` / `gE`: move to the end of the previous word.
+    pub(crate) fn move_word_end_backward(&mut self, big: bool) {
+        let mut line = self.engine.state.cursor.line;
+        let mut col = self.engine.state.cursor.col;
+        let mut chars = self.engine.buffer.line_chars(line);
+        let mut len = content_len(&chars);
+
+        // If the cursor is inside a word, first move to that word's start so
+        // the motion really lands on the *previous* word, not the current end.
+        if col < len && !chars[col].is_whitespace() {
+            let class = word_class(chars[col], big);
+            while col > 0 && word_class(chars[col - 1], big) == class {
+                col -= 1;
+            }
+        }
+
+        loop {
+            if col > 0 {
+                col -= 1;
+            } else if line > 1 {
+                line -= 1;
+                chars = self.engine.buffer.line_chars(line);
+                len = content_len(&chars);
+                if len == 0 {
+                    continue;
+                }
+                col = len - 1;
+            } else {
+                self.engine.state.cursor.line = 1;
+                self.engine.state.cursor.col = 0;
+                self.needs_render = true;
+                return;
+            }
+            let c = chars.get(col).copied().unwrap_or('\n');
+            if !c.is_whitespace() && c != '\n' {
+                break;
+            }
+        }
+
+        let class = word_class(chars[col], big);
+        while col + 1 < len && word_class(chars[col + 1], big) == class {
+            col += 1;
+        }
+        self.engine.state.cursor.line = line;
+        self.engine.state.cursor.col = col;
+        self.needs_render = true;
+    }
+
+    /// Vim's `}`: next paragraph (blank line), or the end of the buffer.
+    pub(crate) fn paragraph_forward(&mut self) {
+        let current = self.engine.state.cursor.line;
+        let last = self.engine.buffer.content_line_count();
+        for line in (current + 1)..=last {
+            if self.engine.buffer.get_line(line).trim().is_empty() {
+                self.engine.state.cursor.line = line;
+                self.engine.state.cursor.col = 0;
+                self.needs_render = true;
+                return;
+            }
+        }
+        self.engine.state.cursor.line = last;
+        self.engine.state.cursor.col = 0;
+        self.needs_render = true;
+    }
+
+    /// Vim's `{`: previous paragraph (blank line), or the start of the buffer.
+    pub(crate) fn paragraph_backward(&mut self) {
+        let current = self.engine.state.cursor.line;
+        for line in (1..current).rev() {
+            if self.engine.buffer.get_line(line).trim().is_empty() {
+                self.engine.state.cursor.line = line;
+                self.engine.state.cursor.col = 0;
+                self.needs_render = true;
+                return;
+            }
+        }
+        self.engine.state.cursor.line = 1;
+        self.engine.state.cursor.col = 0;
+        self.needs_render = true;
+    }
+
+    /// Vim's `)`: next sentence end.
+    pub(crate) fn sentence_forward(&mut self) {
+        let last = self.engine.buffer.content_line_count();
+        let mut line = self.engine.state.cursor.line;
+        let mut col = self.engine.state.cursor.col;
+        loop {
+            let chars = self.engine.buffer.line_chars(line);
+            let len = content_len(&chars);
+            while col + 1 < len {
+                col += 1;
+                let c = chars[col];
+                if matches!(c, '.' | '!' | '?')
+                    && (col + 1 >= len || chars[col + 1].is_whitespace())
+                {
+                    col += 1;
+                    while col < len && chars[col].is_whitespace() {
+                        col += 1;
+                    }
+                    self.engine.state.cursor.line = line;
+                    self.engine.state.cursor.col = col.min(len.saturating_sub(1));
+                    self.needs_render = true;
+                    return;
+                }
+            }
+            if line >= last {
+                self.engine.state.cursor.line = last;
+                self.engine.state.cursor.col = content_len(&chars).saturating_sub(1);
+                self.needs_render = true;
+                return;
+            }
+            line += 1;
+            col = 0;
+        }
+    }
+
+    /// Vim's `(`: previous sentence start.
+    pub(crate) fn sentence_backward(&mut self) {
+        let mut line = self.engine.state.cursor.line;
+        let mut col = self.engine.state.cursor.col;
+        loop {
+            if col > 0 {
+                col -= 1;
+            } else if line > 1 {
+                line -= 1;
+                col = content_len(&self.engine.buffer.line_chars(line));
+                if col == 0 {
+                    continue;
+                }
+                col -= 1;
+            } else {
+                self.engine.state.cursor.line = 1;
+                self.engine.state.cursor.col = 0;
+                self.needs_render = true;
+                return;
+            }
+            let chars = self.engine.buffer.line_chars(line);
+            let len = content_len(&chars);
+            let is_end = matches!(chars.get(col), Some(&('.' | '!' | '?')));
+            let prev_ws = col == 0 || chars.get(col - 1).is_some_and(|c| c.is_whitespace());
+            if is_end && (col + 1 >= len || chars[col + 1].is_whitespace()) {
+                while col > 0 && chars[col - 1].is_whitespace() {
+                    col -= 1;
+                }
+                self.engine.state.cursor.line = line;
+                self.engine.state.cursor.col = col;
+                self.needs_render = true;
+                return;
+            }
+            if prev_ws && col > 0 {
+                // Candidate sentence start: move to the first non-blank.
+                while col > 0 && chars[col - 1].is_whitespace() {
+                    col -= 1;
+                }
+            }
+        }
     }
 
     pub(crate) fn repeat_find(&mut self, forward: bool) -> bool {

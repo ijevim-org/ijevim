@@ -4,12 +4,24 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 impl Editor {
     pub(crate) async fn handle_command(&mut self, key: KeyCode, modifiers: KeyModifiers) {
+        if !matches!(key, KeyCode::Tab) {
+            self.completion_session = None;
+        }
+
         match key {
             KeyCode::Enter => {
-                let cmd = self.engine.state.command_buffer.trim().to_string();
+                let raw_line = self.engine.state.command_buffer.clone();
+                self.push_command_history(&raw_line);
+                let committed_preview = if Self::is_search_line(&raw_line) {
+                    self.commit_search_preview()
+                } else {
+                    false
+                };
+                let cmd = raw_line.trim().to_string();
                 let cmd = cmd.strip_prefix(':').unwrap_or(&cmd);
                 self.engine.state.command_buffer.clear();
                 self.engine.state.command_cursor_pos = 0;
+                self.engine.state.command_hint = None;
 
                 match cmd {
                     "q" => {
@@ -135,11 +147,15 @@ impl Editor {
                     }
                     _ => {
                         if let Some(query) = cmd.strip_prefix('/') {
-                            let direction = SearchDirection::Forward;
-                            self.do_search(query, direction);
+                            if !committed_preview {
+                                let direction = SearchDirection::Forward;
+                                self.do_search(query, direction);
+                            }
                         } else if let Some(query) = cmd.strip_prefix('?') {
-                            let direction = SearchDirection::Backward;
-                            self.do_search(query, direction);
+                            if !committed_preview {
+                                let direction = SearchDirection::Backward;
+                                self.do_search(query, direction);
+                            }
                         } else if cmd.starts_with("set ") {
                             self.handle_set_command(cmd);
                         } else if cmd == "nohlsearch" || cmd == "noh" {
@@ -205,10 +221,24 @@ impl Editor {
                     self.needs_render = true;
                 }
             }
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Char('c') if key == KeyCode::Esc || modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cancel_search_preview();
                 self.engine.state.command_buffer.clear();
                 self.engine.state.command_cursor_pos = 0;
+                self.engine.state.command_hint = None;
+                self.completion_session = None;
                 self.transition_mode(Mode::Normal);
+                self.needs_render = true;
+            }
+            KeyCode::Tab => {
+                self.complete_command_line();
+            }
+            KeyCode::Up => {
+                self.history_prev();
+                self.needs_render = true;
+            }
+            KeyCode::Down => {
+                self.history_next();
                 self.needs_render = true;
             }
             KeyCode::Backspace => {
@@ -223,6 +253,91 @@ impl Editor {
                     self.engine.state.command_buffer.drain(prev..pos);
                     self.engine.state.command_cursor_pos = prev;
                 }
+                self.update_search_preview();
+                self.needs_render = true;
+            }
+            KeyCode::Delete => {
+                let pos = self.engine.state.command_cursor_pos;
+                if pos < self.engine.state.command_buffer.len() {
+                    let next = self.engine.state.command_buffer[pos..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| pos + i)
+                        .unwrap_or(self.engine.state.command_buffer.len());
+                    self.engine.state.command_buffer.drain(pos..next);
+                }
+                self.update_search_preview();
+                self.needs_render = true;
+            }
+            KeyCode::Home => {
+                self.engine.state.command_cursor_pos = 0;
+                self.needs_render = true;
+            }
+            KeyCode::End => {
+                self.engine.state.command_cursor_pos = self.engine.state.command_buffer.len();
+                self.needs_render = true;
+            }
+            // Ctrl-p / Ctrl-n: history navigation
+            KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_prev();
+                self.needs_render = true;
+            }
+            KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.history_next();
+                self.needs_render = true;
+            }
+            // Ctrl-b / Ctrl-f: move one character
+            KeyCode::Char('b') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let pos = self.engine.state.command_cursor_pos;
+                if pos > 0 {
+                    let prev = self.engine.state.command_buffer[..pos]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.engine.state.command_cursor_pos = prev;
+                }
+                self.needs_render = true;
+            }
+            KeyCode::Char('f') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let pos = self.engine.state.command_cursor_pos;
+                if pos < self.engine.state.command_buffer.len() {
+                    let next = self.engine.state.command_buffer[pos..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| pos + i)
+                        .unwrap_or(self.engine.state.command_buffer.len());
+                    self.engine.state.command_cursor_pos = next;
+                }
+                self.needs_render = true;
+            }
+            // Ctrl-k: delete from cursor to end
+            KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.engine.state.command_buffer
+                    .truncate(self.engine.state.command_cursor_pos);
+                self.update_search_preview();
+                self.needs_render = true;
+            }
+            // Ctrl-u: delete from start to cursor
+            KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let pos = self.engine.state.command_cursor_pos;
+                self.engine.state.command_buffer.drain(..pos);
+                self.engine.state.command_cursor_pos = 0;
+                self.update_search_preview();
+                self.needs_render = true;
+            }
+            // Ctrl-d: delete the character under the cursor
+            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let pos = self.engine.state.command_cursor_pos;
+                if pos < self.engine.state.command_buffer.len() {
+                    let next = self.engine.state.command_buffer[pos..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| pos + i)
+                        .unwrap_or(self.engine.state.command_buffer.len());
+                    self.engine.state.command_buffer.drain(pos..next);
+                }
+                self.update_search_preview();
                 self.needs_render = true;
             }
             // Ctrl-a: move cursor to beginning of command line
@@ -249,12 +364,14 @@ impl Editor {
                     self.engine.state.command_buffer.drain(without_word..pos);
                     self.engine.state.command_cursor_pos = without_word;
                 }
+                self.update_search_preview();
                 self.needs_render = true;
             }
             KeyCode::Char(c) => {
                 let pos = self.engine.state.command_cursor_pos;
                 self.engine.state.command_buffer.insert(pos, c);
                 self.engine.state.command_cursor_pos = pos + c.len_utf8();
+                self.update_search_preview();
                 self.needs_render = true;
             }
             // Left arrow: move cursor left
