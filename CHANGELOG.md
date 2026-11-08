@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+
 - README: generated dependency tables (runtime / optional / development, with
   versions, licensing and transitive crate counts). Regenerate with
   `scripts/deps-table.sh --write`; CI verifies it via `--check`.
@@ -19,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `TextBuffer::is_dirty()` / `mark_clean()` / `file_path()` / `set_file_path()` accessors.
 
 ### Changed
+
 - `Editor::new` and `Editor::new_headless_for_test` now return `Result<Self, IjevimError>`
   instead of `Result<Self, Box<dyn std::error::Error>>`. `main` follows suit.
 - `TextBuffer::dirty` and `TextBuffer::file_path` are no longer public fields.
@@ -30,5 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of one character at a time.
 
 ### Fixed
+
 - `TextBuffer::insert` "extend past last line" branch no longer silently
   accepts gaps larger than one line; the intent is now expressed in code.
+
