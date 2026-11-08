@@ -469,7 +469,8 @@ impl Editor {
                 self.exit_visual(Mode::Normal);
             }
             KeyCode::Char('Y') => {
-                self.visual_yank(true);
+                let block = self.engine.state.visual_type == Some(VisualType::Block);
+                self.visual_yank(!block);
                 self.exit_visual(Mode::Normal);
             }
             KeyCode::Char('d') | KeyCode::Char('x') => {
@@ -477,7 +478,15 @@ impl Editor {
                 self.exit_visual(Mode::Normal);
             }
             KeyCode::Char('X') | KeyCode::Char('D') => {
-                self.visual_delete_lines();
+                if self.engine.state.visual_type == Some(VisualType::Block) {
+                    if matches!(key, KeyCode::Char('X')) {
+                        self.visual_delete();
+                    } else {
+                        self.visual_delete_to_eol();
+                    }
+                } else {
+                    self.visual_delete_lines();
+                }
                 self.exit_visual(Mode::Normal);
             }
             KeyCode::Char('c') | KeyCode::Char('s') => {
@@ -556,6 +565,7 @@ impl Editor {
             let (s_line, e_line, s_col, _) = self.block_bounds();
             self.block_insert = Some(crate::editor::BlockInsert {
                 col: s_col,
+                cursor_col: s_col,
                 start_line: s_line,
                 end_line: e_line,
             });
@@ -577,10 +587,11 @@ impl Editor {
             return;
         };
         let pos = if self.engine.state.visual_type == Some(VisualType::Block) {
-            let (s_line, e_line, _, e_col) = self.block_bounds();
+            let (s_line, e_line, s_col, e_col) = self.block_bounds();
             let col = e_col + 1;
             self.block_insert = Some(crate::editor::BlockInsert {
                 col,
+                cursor_col: s_col,
                 start_line: s_line,
                 end_line: e_line,
             });
@@ -613,6 +624,7 @@ impl Editor {
 
     fn visual_yank(&mut self, linewise: bool) {
         let register = self.visual_register();
+        let blockwise = self.engine.state.visual_type == Some(VisualType::Block);
         let content = if linewise {
             if let Some((start, end)) = self.selection_bounds() {
                 let (s, e) = self.normalize_line_selection(start.line, end.line);
@@ -624,12 +636,75 @@ impl Editor {
             self.selection_text()
         };
         if !content.is_empty() {
-            self.engine.register.set(register, &content);
+            let kind = if blockwise {
+                crate::register::RegisterKind::Block
+            } else if linewise || content.ends_with('\n') {
+                crate::register::RegisterKind::Line
+            } else {
+                crate::register::RegisterKind::Char
+            };
+            self.engine.register.set_with_kind(register, &content, kind);
         }
         if let Some((start, _)) = self.selection_bounds() {
             self.engine.state.cursor = start;
         }
         self.needs_render = true;
+    }
+
+    /// Blockwise `D`: truncate every selected line from the block's left edge.
+    fn visual_delete_to_eol(&mut self) {
+        let Some((start, end)) = self.selection_bounds() else {
+            return;
+        };
+        let register = self.visual_register();
+        let s_line = start.line.min(end.line);
+        let e_line = start.line.max(end.line);
+        let s_col = start.col.min(end.col);
+        let cursor_before = self.engine.state.cursor;
+        let mod_count = self.engine.buffer.modification_count();
+        let mut edits = Vec::new();
+        let mut content = String::new();
+        for line in s_line..=e_line {
+            let len = self.engine.buffer.line_content_len(line);
+            if s_col < len {
+                let chars = self.engine.buffer.line_chars(line);
+                let removed: String = chars[s_col..len].iter().collect();
+                content.push_str(&removed);
+                edits.push(Edit {
+                    edit_type: EditType::Delete {
+                        line,
+                        col: s_col,
+                        text: removed.clone(),
+                    },
+                    cursor_before,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                });
+                let start_char = self.engine.buffer.line_to_char(line.saturating_sub(1)) + s_col;
+                self.engine
+                    .buffer
+                    .remove_range(start_char, start_char + removed.chars().count());
+            }
+            if line < e_line {
+                content.push('\n');
+            }
+        }
+        if !content.is_empty() {
+            self.engine.register.set_with_kind(
+                register,
+                &content,
+                crate::register::RegisterKind::Block,
+            );
+        }
+        self.engine.state.cursor.line = s_line;
+        self.engine.state.cursor.col = s_col.saturating_sub(1).min(
+            self.engine
+                .buffer
+                .line_content_len(s_line)
+                .saturating_sub(1),
+        );
+        self.push_undo_group(edits);
+        self.on_buffer_modified();
     }
 
     /// Delete the current selection as one undo group.
@@ -658,6 +733,7 @@ impl Editor {
                 let (s_line, e_line, s_col, _) = self.block_bounds();
                 Some(crate::editor::BlockInsert {
                     col: s_col,
+                    cursor_col: s_col,
                     start_line: s_line,
                     end_line: e_line,
                 })
@@ -808,6 +884,7 @@ impl Editor {
         if content.is_empty() {
             return;
         }
+        let kind = self.engine.register.kind(register);
         let Some((start, _)) = self.selection_bounds() else {
             return;
         };
@@ -820,6 +897,21 @@ impl Editor {
         };
 
         let linewise = content.ends_with('\n');
+        if kind == crate::register::RegisterKind::Block {
+            let mut block_edits = self.insert_block_lines(
+                insert_at.line,
+                insert_at.col,
+                &content,
+                cursor_before,
+                mod_count,
+            );
+            edits.append(&mut block_edits);
+            self.engine.state.cursor = insert_at;
+            self.push_undo_group(edits);
+            self.on_buffer_modified();
+            self.exit_visual(Mode::Normal);
+            return;
+        }
         let (edit_line, edit_col) = if linewise {
             let line = insert_at.line;
             self.engine.buffer.insert(line, 0, &content);

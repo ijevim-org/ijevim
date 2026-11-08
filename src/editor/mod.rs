@@ -43,7 +43,10 @@ pub(crate) struct CompletionSession {
 /// The first line is edited live while typing; when Insert mode ends the
 /// accumulated text is replayed at `col` on the remaining lines.
 pub(crate) struct BlockInsert {
+    /// Column the typed text is replayed at on the trailing lines.
     pub col: usize,
+    /// Column the cursor rests on once the block insert finishes.
+    pub cursor_col: usize,
     pub start_line: usize,
     pub end_line: usize,
 }

@@ -95,7 +95,7 @@ impl Editor {
                         }
                         self.engine.state.cursor = crate::types::Position {
                             line: block.start_line,
-                            col: block.col,
+                            col: block.cursor_col,
                         };
                     }
                     self.push_undo_group(edits);

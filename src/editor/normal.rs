@@ -1511,6 +1511,10 @@ impl Editor {
         if content.is_empty() {
             return;
         }
+        if self.engine.register.kind(register) == crate::register::RegisterKind::Block {
+            self.paste_block(register, &content, before, count);
+            return;
+        }
         // `3p` pastes three copies as one change, so a single `u` reverts it.
         let content = content.repeat(count.max(1));
 
@@ -1552,6 +1556,59 @@ impl Editor {
             modification_count: mod_count,
         });
         self.on_buffer_modified();
+    }
+
+    /// Blockwise `p` / `P`: paste each register line at the same column,
+    /// padding short lines with spaces like Vim.
+    fn paste_block(&mut self, register: char, content: &str, before: bool, count: usize) {
+        let line = self.engine.state.cursor.line;
+        let base_col = self.engine.state.cursor.col;
+        let width = self.engine.register.block_width(register).max(1);
+        let cursor_before = self.engine.state.cursor;
+        let mod_count = self.engine.buffer.modification_count();
+        let mut edits = Vec::new();
+        let mut col = if before { base_col } else { base_col + 1 };
+        for _ in 0..count.max(1) {
+            edits.extend(self.insert_block_lines(line, col, content, cursor_before, mod_count));
+            col += width;
+        }
+        self.engine.state.cursor.line = line;
+        self.engine.state.cursor.col = (if before { base_col } else { base_col + 1 })
+            .min(self.engine.buffer.line_content_len(line));
+        self.push_undo_group(edits);
+        self.on_buffer_modified();
+    }
+
+    /// Insert a rectangular block of text (`content` split on newlines) at
+    /// `col` on `line` and following lines. Returns the undo edits.
+    pub(crate) fn insert_block_lines(
+        &mut self,
+        line: usize,
+        col: usize,
+        content: &str,
+        cursor_before: crate::types::Position,
+        mod_count: usize,
+    ) -> Vec<Edit> {
+        let mut edits = Vec::new();
+        let mut target = line;
+        for seg in content.split('\n') {
+            let len = self.engine.buffer.line_content_len(target);
+            let at = col.min(len);
+            let text = format!("{}{}", " ".repeat(col.saturating_sub(len)), seg);
+            self.engine.buffer.insert(target, at, &text);
+            edits.push(Edit {
+                edit_type: EditType::Insert {
+                    line: target,
+                    col: at,
+                    text,
+                },
+                cursor_before,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
+            target += 1;
+        }
+        edits
     }
 
     /// Toggle case of character under cursor (`~`).
