@@ -2351,7 +2351,7 @@ async fn paragraph_motions_stop_on_blank_lines() {
 
     type_keys(&mut ed, "}").await;
     let (_, line, _, _) = ed.snapshot_for_test();
-    assert_eq!(line, 5, "the last } reaches the end of the buffer");
+    assert_eq!(line, 5, "the last }} reaches the end of the buffer");
 
     type_keys(&mut ed, "{").await;
     let (_, line, _, _) = ed.snapshot_for_test();
@@ -2670,7 +2670,10 @@ async fn ctrl_e_and_ctrl_y_scroll_the_viewport() {
     ctrl_key(&mut ed, 'e').await;
     let top = ed.engine.window_layout.windows[0].scroll_top;
     assert_eq!(top, 2);
-    assert_eq!(ed.engine.state.cursor.line, 2, "cursor follows the top line");
+    assert_eq!(
+        ed.engine.state.cursor.line, 2,
+        "cursor follows the top line"
+    );
 
     ctrl_key(&mut ed, 'y').await;
     assert_eq!(ed.engine.window_layout.windows[0].scroll_top, 1);
@@ -2691,10 +2694,7 @@ async fn zt_zz_zb_move_the_viewport_not_the_cursor() {
     assert_eq!(ed.engine.state.cursor.line, 20);
 
     type_keys(&mut ed, "zz").await;
-    assert_eq!(
-        ed.engine.window_layout.windows[0].scroll_top,
-        20 - rows / 2
-    );
+    assert_eq!(ed.engine.window_layout.windows[0].scroll_top, 20 - rows / 2);
     assert_eq!(ed.engine.state.cursor.line, 20);
 
     type_keys(&mut ed, "zb").await;
@@ -2703,4 +2703,98 @@ async fn zt_zz_zb_move_the_viewport_not_the_cursor() {
         20 - (rows - 1)
     );
     assert_eq!(ed.engine.state.cursor.line, 20);
+}
+
+// ── Ex ranges from Visual mode ────────────────────────────────────
+
+#[tokio::test]
+async fn visual_colon_delete_removes_the_selected_lines() {
+    let mut ed = test_vim_editor("one\ntwo\nthree\n");
+    type_keys(&mut ed, "vj").await;
+    press_key(&mut ed, KeyCode::Char(':')).await;
+    assert_eq!(ed.engine.state.command_buffer, "'<,'>");
+    type_keys(&mut ed, "d").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let (buf, _, _, mode) = ed.snapshot_for_test();
+    assert_eq!(buf, "three\n");
+    assert_eq!(mode, Mode::Normal);
+}
+
+#[tokio::test]
+async fn visual_colon_substitute_applies_to_the_selection() {
+    let mut ed = test_vim_editor("aa\nbb\naa\n");
+    type_keys(&mut ed, "vj").await;
+    press_key(&mut ed, KeyCode::Char(':')).await;
+    type_keys(&mut ed, "s/a/x/g").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "xx\nbb\naa\n");
+}
+
+#[tokio::test]
+async fn percent_range_indents_every_line() {
+    let mut ed = test_vim_editor("one\ntwo\n");
+    run_command(&mut ed, "%>").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "\tone\n\ttwo\n");
+}
+
+// ── Block-wise insert (Ctrl-v + I/A/c) ────────────────────────────
+
+async fn ctrl_v(ed: &mut Editor) {
+    ed.handle_key_for_test(KeyCode::Char('v'), KeyModifiers::CONTROL)
+        .await;
+}
+
+#[tokio::test]
+async fn block_insert_replays_on_every_selected_line() {
+    let mut ed = test_vim_editor("abc\ndef\nghi\n");
+    ctrl_v(&mut ed).await;
+    type_keys(&mut ed, "jjI").await;
+    type_keys(&mut ed, "X").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, mode) = ed.snapshot_for_test();
+    assert_eq!(buf, "Xabc\nXdef\nXghi\n");
+    assert_eq!(mode, Mode::Normal);
+}
+
+#[tokio::test]
+async fn block_append_inserts_after_the_rightmost_column() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+    ctrl_v(&mut ed).await;
+    type_keys(&mut ed, "jA").await;
+    type_keys(&mut ed, "X").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "aXbc\ndXef\n");
+}
+
+#[tokio::test]
+async fn block_change_replays_on_every_selected_line() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+    ctrl_v(&mut ed).await;
+    type_keys(&mut ed, "jlc").await;
+    type_keys(&mut ed, "Z").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "Zc\nZf\n");
+}
+
+#[tokio::test]
+async fn block_insert_undoes_as_one_change() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+    ctrl_v(&mut ed).await;
+    type_keys(&mut ed, "jI").await;
+    type_keys(&mut ed, "X").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+    type_keys(&mut ed, "u").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abc\ndef\n");
 }

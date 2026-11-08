@@ -434,7 +434,6 @@ impl Editor {
         self.engine.state.command_hint = None;
         self.needs_render = true;
     }
-
 }
 
 fn path_candidates(prefix: &str) -> Vec<String> {

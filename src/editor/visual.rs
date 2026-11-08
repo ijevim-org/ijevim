@@ -75,13 +75,12 @@ impl Editor {
     fn selection_bounds(&self) -> Option<(Position, Position)> {
         let start = self.engine.state.visual_start?;
         let cursor = self.engine.state.cursor;
-        let (a, b) = if start.line < cursor.line
-            || (start.line == cursor.line && start.col <= cursor.col)
-        {
-            (start, cursor)
-        } else {
-            (cursor, start)
-        };
+        let (a, b) =
+            if start.line < cursor.line || (start.line == cursor.line && start.col <= cursor.col) {
+                (start, cursor)
+            } else {
+                (cursor, start)
+            };
         Some((a, b))
     }
 
@@ -89,23 +88,26 @@ impl Editor {
         let Some((start, end)) = self.selection_bounds() else {
             return String::new();
         };
-        match self.engine.state.visual_type.unwrap_or(VisualType::Character) {
-            VisualType::Character => self.engine.buffer.get_char_range(
-                start.line,
-                start.col,
-                end.line,
-                end.col + 1,
-            ),
+        match self
+            .engine
+            .state
+            .visual_type
+            .unwrap_or(VisualType::Character)
+        {
+            VisualType::Character => {
+                self.engine
+                    .buffer
+                    .get_char_range(start.line, start.col, end.line, end.col + 1)
+            }
             VisualType::Line => {
                 let (s, e) = self.normalize_line_selection(start.line, end.line);
                 self.engine.buffer.get_line_range(s, e)
             }
-            VisualType::Block => self.engine.buffer.get_block_range(
-                start.line,
-                start.col,
-                end.line,
-                end.col + 1,
-            ),
+            VisualType::Block => {
+                self.engine
+                    .buffer
+                    .get_block_range(start.line, start.col, end.line, end.col + 1)
+            }
         }
     }
 
@@ -190,9 +192,7 @@ impl Editor {
 
         // ── Numeric count prefix ────────────────────────────────────
         if let KeyCode::Char(c) = key {
-            if c.is_ascii_digit()
-                && (c != '0' || self.engine.operator_state.count.is_some())
-            {
+            if c.is_ascii_digit() && (c != '0' || self.engine.operator_state.count.is_some()) {
                 let digit = c.to_digit(10).unwrap() as usize;
                 self.engine.operator_state.count = Some(
                     self.engine
@@ -512,11 +512,7 @@ impl Editor {
                 if let Some((start, end)) = self.selection_bounds() {
                     self.engine.state.cursor.line = start.line.min(end.line);
                     for _ in 0..count {
-                        self.indent_lines(
-                            start.line.min(end.line),
-                            start.line.max(end.line),
-                            true,
-                        );
+                        self.indent_lines(start.line.min(end.line), start.line.max(end.line), true);
                     }
                 }
                 self.exit_visual(Mode::Normal);
@@ -553,21 +549,66 @@ impl Editor {
     /// `I` / `A` for block selections is handled in the keymap; this is the
     /// shared entry point for all visual types.
     pub(crate) fn visual_insert_start(&mut self) {
-        if let Some((start, _)) = self.selection_bounds() {
-            self.engine.state.cursor = start;
-            self.engine.insert_state.accum.clear();
-            self.engine.insert_state.start_pos = Some(start);
-            self.exit_visual(Mode::Insert);
-        }
+        let Some((start, _)) = self.selection_bounds() else {
+            return;
+        };
+        let pos = if self.engine.state.visual_type == Some(VisualType::Block) {
+            let (s_line, e_line, s_col, _) = self.block_bounds();
+            self.block_insert = Some(crate::editor::BlockInsert {
+                col: s_col,
+                start_line: s_line,
+                end_line: e_line,
+            });
+            Position {
+                line: s_line,
+                col: s_col,
+            }
+        } else {
+            start
+        };
+        self.engine.state.cursor = pos;
+        self.engine.insert_state.accum.clear();
+        self.engine.insert_state.start_pos = Some(pos);
+        self.exit_visual(Mode::Insert);
     }
 
     pub(crate) fn visual_insert_end(&mut self) {
-        if let Some((_, end)) = self.selection_bounds() {
-            self.engine.state.cursor = end;
-            self.engine.insert_state.accum.clear();
-            self.engine.insert_state.start_pos = Some(end);
-            self.exit_visual(Mode::Insert);
-        }
+        let Some((_, end)) = self.selection_bounds() else {
+            return;
+        };
+        let pos = if self.engine.state.visual_type == Some(VisualType::Block) {
+            let (s_line, e_line, _, e_col) = self.block_bounds();
+            let col = e_col + 1;
+            self.block_insert = Some(crate::editor::BlockInsert {
+                col,
+                start_line: s_line,
+                end_line: e_line,
+            });
+            Position { line: s_line, col }
+        } else {
+            end
+        };
+        self.engine.state.cursor = pos;
+        self.engine.insert_state.accum.clear();
+        self.engine.insert_state.start_pos = Some(pos);
+        self.exit_visual(Mode::Insert);
+    }
+
+    /// Block selection bounds: `(start_line, end_line, start_col, end_col)`,
+    /// all inclusive.
+    fn block_bounds(&self) -> (usize, usize, usize, usize) {
+        let anchor = self
+            .engine
+            .state
+            .visual_start
+            .unwrap_or(self.engine.state.cursor);
+        let cursor = self.engine.state.cursor;
+        (
+            anchor.line.min(cursor.line),
+            anchor.line.max(cursor.line),
+            anchor.col.min(cursor.col),
+            anchor.col.max(cursor.col),
+        )
     }
 
     fn visual_yank(&mut self, linewise: bool) {
@@ -613,8 +654,20 @@ impl Editor {
                 self.change_line_range(register, s, e);
             }
         } else {
-            self.visual_delete_collect(register);
+            let block = if self.engine.state.visual_type == Some(VisualType::Block) {
+                let (s_line, e_line, s_col, _) = self.block_bounds();
+                Some(crate::editor::BlockInsert {
+                    col: s_col,
+                    start_line: s_line,
+                    end_line: e_line,
+                })
+            } else {
+                None
+            };
+            let edits = self.visual_delete_collect(register);
+            self.push_undo_group(edits);
             self.enter_insert_after_change();
+            self.block_insert = block;
         }
     }
 
@@ -623,15 +676,18 @@ impl Editor {
         let Some((start, end)) = self.selection_bounds() else {
             return Vec::new();
         };
-        let vtype = self.engine.state.visual_type.unwrap_or(VisualType::Character);
+        let vtype = self
+            .engine
+            .state
+            .visual_type
+            .unwrap_or(VisualType::Character);
         let cursor_before = self.engine.state.cursor;
         let mod_count = self.engine.buffer.modification_count();
         let mut edits: Vec<Edit> = Vec::new();
 
         let (cursor_line, cursor_col) = match vtype {
             VisualType::Character => {
-                let (s_line, s_col, e_line, e_col) =
-                    self.normalize_selection(&start, &end);
+                let (s_line, s_col, e_line, e_col) = self.normalize_selection(&start, &end);
                 let content = self
                     .engine
                     .buffer
@@ -746,7 +802,7 @@ impl Editor {
     }
 
     /// Visual `p` / `P`: replace the selection with the register contents.
-    fn visual_put(&mut self, before: bool) {
+    fn visual_put(&mut self, _before: bool) {
         let register = self.visual_register();
         let content = self.engine.register.get(register);
         if content.is_empty() {
@@ -765,14 +821,15 @@ impl Editor {
 
         let linewise = content.ends_with('\n');
         let (edit_line, edit_col) = if linewise {
-            let line = if before { insert_at.line } else { insert_at.line };
+            let line = insert_at.line;
             self.engine.buffer.insert(line, 0, &content);
             self.engine.state.cursor.line = line.min(self.engine.buffer.line_count());
-            self.engine.state.cursor.col =
-                self.first_non_blank_col(self.engine.state.cursor.line);
+            self.engine.state.cursor.col = self.first_non_blank_col(self.engine.state.cursor.line);
             (line, 0)
         } else {
-            self.engine.buffer.insert(insert_at.line, insert_at.col, &content);
+            self.engine
+                .buffer
+                .insert(insert_at.line, insert_at.col, &content);
             let pasted = content.chars().count();
             self.engine.state.cursor.line = insert_at.line;
             self.engine.state.cursor.col = insert_at.col + pasted.saturating_sub(1);
@@ -837,7 +894,11 @@ impl Editor {
         let Some((start, end)) = self.selection_bounds() else {
             return;
         };
-        let vtype = self.engine.state.visual_type.unwrap_or(VisualType::Character);
+        let vtype = self
+            .engine
+            .state
+            .visual_type
+            .unwrap_or(VisualType::Character);
         let cursor_before = self.engine.state.cursor;
         let mod_count = self.engine.buffer.modification_count();
         let mut edits = Vec::new();
@@ -846,21 +907,61 @@ impl Editor {
             VisualType::Character => {
                 let (s_line, s_col, e_line, e_col) = self.normalize_selection(&start, &end);
                 if s_line == e_line {
-                    self.transform_line(s_line, s_col, e_col, transform, cursor_before, mod_count, &mut edits);
+                    self.transform_line(
+                        s_line,
+                        s_col,
+                        e_col,
+                        transform,
+                        cursor_before,
+                        mod_count,
+                        &mut edits,
+                    );
                 } else {
-                    self.transform_line(s_line, s_col, self.line_content_len(s_line), transform, cursor_before, mod_count, &mut edits);
+                    self.transform_line(
+                        s_line,
+                        s_col,
+                        self.line_content_len(s_line),
+                        transform,
+                        cursor_before,
+                        mod_count,
+                        &mut edits,
+                    );
                     for line in (s_line + 1)..e_line {
                         let len = self.line_content_len(line);
-                        self.transform_line(line, 0, len, transform, cursor_before, mod_count, &mut edits);
+                        self.transform_line(
+                            line,
+                            0,
+                            len,
+                            transform,
+                            cursor_before,
+                            mod_count,
+                            &mut edits,
+                        );
                     }
-                    self.transform_line(e_line, 0, e_col, transform, cursor_before, mod_count, &mut edits);
+                    self.transform_line(
+                        e_line,
+                        0,
+                        e_col,
+                        transform,
+                        cursor_before,
+                        mod_count,
+                        &mut edits,
+                    );
                 }
             }
             VisualType::Line => {
                 let (s, e) = self.normalize_line_selection(start.line, end.line);
                 for line in s..=e {
                     let len = self.line_content_len(line);
-                    self.transform_line(line, 0, len, transform, cursor_before, mod_count, &mut edits);
+                    self.transform_line(
+                        line,
+                        0,
+                        len,
+                        transform,
+                        cursor_before,
+                        mod_count,
+                        &mut edits,
+                    );
                 }
             }
             VisualType::Block => {
@@ -869,7 +970,15 @@ impl Editor {
                 let s_col = start.col.min(end.col);
                 let e_col = start.col.max(end.col) + 1;
                 for line in s_line..=e_line {
-                    self.transform_line(line, s_col, e_col, transform, cursor_before, mod_count, &mut edits);
+                    self.transform_line(
+                        line,
+                        s_col,
+                        e_col,
+                        transform,
+                        cursor_before,
+                        mod_count,
+                        &mut edits,
+                    );
                 }
             }
         }
@@ -941,42 +1050,47 @@ impl Editor {
             self.transition_mode(Mode::Normal);
             return;
         };
-        let vtype = self.engine.state.visual_type.unwrap_or(VisualType::Character);
+        let vtype = self
+            .engine
+            .state
+            .visual_type
+            .unwrap_or(VisualType::Character);
         let cursor_before = self.engine.state.cursor;
         let mod_count = self.engine.buffer.modification_count();
         let mut edits = Vec::new();
-        let mut replace_line = |editor: &mut Editor, line: usize, start_col: usize, end_col: usize| {
-            let chars = editor.engine.buffer.line_chars(line);
-            if start_col >= chars.len() {
-                return;
-            }
-            let end_col = end_col.min(chars.len());
-            let old: String = chars[start_col..end_col].iter().collect();
-            let new: String = old
-                .chars()
-                .map(|c| if c == '\n' { c } else { ch })
-                .collect();
-            if old == new {
-                return;
-            }
-            let char_start = editor.engine.buffer.line_to_char(line - 1) + start_col;
-            editor
-                .engine
-                .buffer
-                .remove_range(char_start, char_start + old.chars().count());
-            editor.engine.buffer.insert(line, start_col, &new);
-            edits.push(Edit {
-                edit_type: EditType::Replace {
-                    line,
-                    col: start_col,
-                    old_text: old,
-                    new_text: new,
-                },
-                cursor_before,
-                cursor_after: editor.engine.state.cursor,
-                modification_count: mod_count,
-            });
-        };
+        let mut replace_line =
+            |editor: &mut Editor, line: usize, start_col: usize, end_col: usize| {
+                let chars = editor.engine.buffer.line_chars(line);
+                if start_col >= chars.len() {
+                    return;
+                }
+                let end_col = end_col.min(chars.len());
+                let old: String = chars[start_col..end_col].iter().collect();
+                let new: String = old
+                    .chars()
+                    .map(|c| if c == '\n' { c } else { ch })
+                    .collect();
+                if old == new {
+                    return;
+                }
+                let char_start = editor.engine.buffer.line_to_char(line - 1) + start_col;
+                editor
+                    .engine
+                    .buffer
+                    .remove_range(char_start, char_start + old.chars().count());
+                editor.engine.buffer.insert(line, start_col, &new);
+                edits.push(Edit {
+                    edit_type: EditType::Replace {
+                        line,
+                        col: start_col,
+                        old_text: old,
+                        new_text: new,
+                    },
+                    cursor_before,
+                    cursor_after: editor.engine.state.cursor,
+                    modification_count: mod_count,
+                });
+            };
 
         match vtype {
             VisualType::Character => {
@@ -1047,7 +1161,10 @@ impl Editor {
                     }
                     range = Some((
                         Position { line, col: s },
-                        Position { line, col: e.saturating_sub(1) },
+                        Position {
+                            line,
+                            col: e.saturating_sub(1),
+                        },
                     ));
                 }
             }
@@ -1061,19 +1178,13 @@ impl Editor {
                     }
                 }
                 let mut close = None;
-                for i in (col + 1)..chars.len() {
-                    if chars[i] == c {
-                        close = Some(i);
-                        break;
-                    }
+                if let Some(i) = chars.iter().skip(col + 1).position(|&ch| ch == c) {
+                    close = Some(col + 1 + i);
                 }
                 if let (Some(o), Some(cl)) = (open, close) {
                     let (s, e) = if inner { (o + 1, cl) } else { (o, cl + 1) };
                     if e > s {
-                        range = Some((
-                            Position { line, col: s },
-                            Position { line, col: e - 1 },
-                        ));
+                        range = Some((Position { line, col: s }, Position { line, col: e - 1 }));
                     }
                 }
             }
@@ -1087,13 +1198,25 @@ impl Editor {
                 if let Some((s, e)) = self.find_enclosing_pair(open, close) {
                     let (s, e) = if inner {
                         (
-                            Position { line: s.0, col: s.1 + 1 },
-                            Position { line: e.0, col: e.1.saturating_sub(1) },
+                            Position {
+                                line: s.0,
+                                col: s.1 + 1,
+                            },
+                            Position {
+                                line: e.0,
+                                col: e.1.saturating_sub(1),
+                            },
                         )
                     } else {
                         (
-                            Position { line: s.0, col: s.1 },
-                            Position { line: e.0, col: e.1 },
+                            Position {
+                                line: s.0,
+                                col: s.1,
+                            },
+                            Position {
+                                line: e.0,
+                                col: e.1,
+                            },
                         )
                     };
                     if (e.line, e.col) >= (s.line, s.col) {
@@ -1111,9 +1234,16 @@ impl Editor {
                 while e < last && !self.engine.buffer.get_line(e + 1).trim().is_empty() {
                     e += 1;
                 }
-                let start_col = if inner { self.first_non_blank_col(s) } else { 0 };
+                let start_col = if inner {
+                    self.first_non_blank_col(s)
+                } else {
+                    0
+                };
                 range = Some((
-                    Position { line: s, col: start_col },
+                    Position {
+                        line: s,
+                        col: start_col,
+                    },
                     Position {
                         line: e,
                         col: self.line_content_len(e).saturating_sub(1),

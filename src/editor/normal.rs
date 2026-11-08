@@ -1052,7 +1052,8 @@ impl Editor {
                     ) {
                         self.engine.state.visual_start = Some(start);
                         self.engine.state.visual_type = Some(vtype);
-                        self.engine.state.cursor = self.engine.state.last_visual_end.unwrap_or(start);
+                        self.engine.state.cursor =
+                            self.engine.state.last_visual_end.unwrap_or(start);
                         let prev_mode = self.engine.state.mode;
                         self.engine.state.mode = Mode::Visual;
                         self.engine.plugin_manager.emit(PluginEvent::ModeChange {
@@ -1124,7 +1125,12 @@ impl Editor {
     ///
     /// Multi-step operators (`3dw`, `dj`, ...) collect the entries and push
     /// them as one group, so the single `u` a user expects restores them all.
-    pub(crate) fn delete_cols_edit(&mut self, register: char, start: usize, end: usize) -> Option<Edit> {
+    pub(crate) fn delete_cols_edit(
+        &mut self,
+        register: char,
+        start: usize,
+        end: usize,
+    ) -> Option<Edit> {
         let line = self.engine.state.cursor.line;
         let (start, end) = (start.min(end), start.max(end));
         let end = end.min(self.line_content_len(line));
@@ -1170,7 +1176,12 @@ impl Editor {
     }
 
     /// Delete whole lines `start_line..=end_line` as a single undo step.
-    pub(crate) fn delete_lines_range(&mut self, register: char, start_line: usize, end_line: usize) {
+    pub(crate) fn delete_lines_range(
+        &mut self,
+        register: char,
+        start_line: usize,
+        end_line: usize,
+    ) {
         let line_count = self.engine.buffer.line_count();
         let start = start_line.max(1).min(line_count);
         let end = end_line.max(1).min(line_count);
@@ -1225,7 +1236,11 @@ impl Editor {
     /// A repeated `w` that lands in column 0 of a later line stops at the end
     /// of the previous line: the line break is only part of the motion when
     /// the target is further into the line.
-    pub(crate) fn exclusive_target(&self, from_line: usize, target: (usize, usize)) -> (usize, usize) {
+    pub(crate) fn exclusive_target(
+        &self,
+        from_line: usize,
+        target: (usize, usize),
+    ) -> (usize, usize) {
         let (line, col) = target;
         if line > from_line && col == 0 {
             (line - 1, self.line_content_len(line - 1))
@@ -1235,7 +1250,12 @@ impl Editor {
     }
 
     /// Target of `{count}w` / `{count}e`, honoring the count across lines.
-    pub(crate) fn word_motion_target(&self, count: usize, big: bool, to_word_end: bool) -> (usize, usize) {
+    pub(crate) fn word_motion_target(
+        &self,
+        count: usize,
+        big: bool,
+        to_word_end: bool,
+    ) -> (usize, usize) {
         let (mut line, mut col) = (self.engine.state.cursor.line, self.engine.state.cursor.col);
         for _ in 0..count.max(1) {
             let next = if to_word_end {

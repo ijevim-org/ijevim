@@ -20,6 +20,8 @@ vkeys=${vkeys//<Enter>/\\<CR>}
 vkeys=${vkeys//<BS>/\\<BS>}
 vkeys=${vkeys//<Tab>/\\<Tab>}
 vkeys=${vkeys//<Space>/ }
+# Control keys: <C-v> -> \<C-v> (generic for a-z / A-Z).
+vkeys=$(printf '%s' "$vkeys" | sed -E 's/<[Cc]-([A-Za-z])>/\\<C-\1>/g')
 
 printf '%b' "$text" > "$tmp/buf"
 

@@ -4,8 +4,8 @@ pub(crate) mod emacs_ops;
 pub(crate) mod insert;
 pub(crate) mod macro_marks;
 pub(crate) mod motion;
-pub(crate) mod number;
 pub(crate) mod normal;
+pub(crate) mod number;
 pub(crate) mod search;
 pub(crate) mod text_object;
 pub(crate) mod visual;
@@ -17,8 +17,8 @@ use crate::keymap::{create_keymap, KeymapHandler};
 use crate::plugin::PluginManager;
 use crate::renderer::Renderer;
 use crate::review::ReviewArgs;
-use crate::terminal::Terminal;
 use crate::state::SearchState;
+use crate::terminal::Terminal;
 use crate::types::{
     EditorState, Keymap, MessageLevel, Mode, Position, Result, SearchDirection, SearchResult,
 };
@@ -36,6 +36,16 @@ pub(crate) struct CompletionSession {
     pub start: usize,
     pub candidates: Vec<String>,
     pub index: usize,
+}
+
+/// Pending block-wise insert (`Ctrl-v` + `I`/`A`/`c`).
+///
+/// The first line is edited live while typing; when Insert mode ends the
+/// accumulated text is replayed at `col` on the remaining lines.
+pub(crate) struct BlockInsert {
+    pub col: usize,
+    pub start_line: usize,
+    pub end_line: usize,
 }
 
 /// State for the incremental search preview while typing `/` or `?`.
@@ -82,6 +92,8 @@ pub struct Editor {
     pub(crate) viewport_override: bool,
     /// `Ctrl-o` in Insert mode: the next command runs in Normal mode.
     pub(crate) one_shot_normal: bool,
+    /// Active block insert, replayed on Escape.
+    pub(crate) block_insert: Option<BlockInsert>,
 }
 
 impl Editor {
@@ -146,6 +158,7 @@ impl Editor {
             search_preview: None,
             viewport_override: false,
             one_shot_normal: false,
+            block_insert: None,
         }
     }
 
@@ -302,63 +315,67 @@ impl Editor {
                         // the viewport for this frame.
                         self.viewport_override = false;
                     } else {
-                    // Auto-scroll: keep cursor visible.
-                    let show_num = self.engine.state.show_line_numbers
-                        || self.engine.state.show_relative_numbers;
-                    let line_num_width = if show_num {
-                        self.engine.buffer.line_count().max(1).to_string().len()
-                    } else {
-                        0
-                    };
-                    let line_num_prefix = if show_num { line_num_width + 2 } else { 0 };
-                    let window_rows = w.row_end.saturating_sub(w.row_start);
-                    let window_cols = w.col_end.saturating_sub(w.col_start);
-                    let content_width = window_cols.saturating_sub(line_num_prefix).max(1);
-                    let tabstop = self.engine.state.tabstop;
+                        // Auto-scroll: keep cursor visible.
+                        let show_num = self.engine.state.show_line_numbers
+                            || self.engine.state.show_relative_numbers;
+                        let line_num_width = if show_num {
+                            self.engine.buffer.line_count().max(1).to_string().len()
+                        } else {
+                            0
+                        };
+                        let line_num_prefix = if show_num { line_num_width + 2 } else { 0 };
+                        let window_rows = w.row_end.saturating_sub(w.row_start);
+                        let window_cols = w.col_end.saturating_sub(w.col_start);
+                        let content_width = window_cols.saturating_sub(line_num_prefix).max(1);
+                        let tabstop = self.engine.state.tabstop;
 
-                    let cursor_col = w.cursor.col;
-                    let total_lines = self.engine.buffer.line_count();
+                        let cursor_col = w.cursor.col;
+                        let total_lines = self.engine.buffer.line_count();
 
-                    let mut visual_offset = 0usize;
-                    let end_scan = cursor_line.min(total_lines);
-                    for line_num in w.scroll_top.max(1)..end_scan {
-                        let line_text = self.engine.buffer.get_line(line_num);
-                        visual_offset = visual_offset.saturating_add(
-                            crate::renderer::wrapped_rows(&line_text, content_width, true, tabstop),
-                        );
-                    }
-                    if cursor_line >= w.scroll_top && cursor_line <= total_lines {
-                        let line_text = self.engine.buffer.get_line(cursor_line);
-                        let nchars = line_text.chars().count();
-                        let nsegs = nchars.div_ceil(content_width).max(1);
-                        let seg = (cursor_col / content_width).min(nsegs.saturating_sub(1));
-                        visual_offset = visual_offset.saturating_add(seg);
-                    }
-
-                    // Use configured scrolloff, with a minimum of 1 to keep 1 line visible.
-                    let scrolloff = self.engine.state.scrolloff;
-                    let margin = if scrolloff > 0 {
-                        scrolloff.min(window_rows.saturating_sub(1) / 2)
-                    } else {
-                        (window_rows / 3).max(1)
-                    };
-
-                    if cursor_line < w.scroll_top {
-                        w.scroll_top = cursor_line.saturating_sub(margin).max(1);
-                        self.needs_render = true;
-                    } else if visual_offset >= window_rows.saturating_sub(1) {
-                        let mut new_scroll = cursor_line;
-                        let mut rows_needed = margin;
-                        while new_scroll > 1 && rows_needed > 0 {
-                            new_scroll -= 1;
-                            let t = self.engine.buffer.get_line(new_scroll);
-                            rows_needed = rows_needed.saturating_sub(
-                                crate::renderer::wrapped_rows(&t, content_width, true, tabstop),
-                            );
+                        let mut visual_offset = 0usize;
+                        let end_scan = cursor_line.min(total_lines);
+                        for line_num in w.scroll_top.max(1)..end_scan {
+                            let line_text = self.engine.buffer.get_line(line_num);
+                            visual_offset =
+                                visual_offset.saturating_add(crate::renderer::wrapped_rows(
+                                    &line_text,
+                                    content_width,
+                                    true,
+                                    tabstop,
+                                ));
                         }
-                        w.scroll_top = new_scroll.max(1);
-                        self.needs_render = true;
-                    }
+                        if cursor_line >= w.scroll_top && cursor_line <= total_lines {
+                            let line_text = self.engine.buffer.get_line(cursor_line);
+                            let nchars = line_text.chars().count();
+                            let nsegs = nchars.div_ceil(content_width).max(1);
+                            let seg = (cursor_col / content_width).min(nsegs.saturating_sub(1));
+                            visual_offset = visual_offset.saturating_add(seg);
+                        }
+
+                        // Use configured scrolloff, with a minimum of 1 to keep 1 line visible.
+                        let scrolloff = self.engine.state.scrolloff;
+                        let margin = if scrolloff > 0 {
+                            scrolloff.min(window_rows.saturating_sub(1) / 2)
+                        } else {
+                            (window_rows / 3).max(1)
+                        };
+
+                        if cursor_line < w.scroll_top {
+                            w.scroll_top = cursor_line.saturating_sub(margin).max(1);
+                            self.needs_render = true;
+                        } else if visual_offset >= window_rows.saturating_sub(1) {
+                            let mut new_scroll = cursor_line;
+                            let mut rows_needed = margin;
+                            while new_scroll > 1 && rows_needed > 0 {
+                                new_scroll -= 1;
+                                let t = self.engine.buffer.get_line(new_scroll);
+                                rows_needed = rows_needed.saturating_sub(
+                                    crate::renderer::wrapped_rows(&t, content_width, true, tabstop),
+                                );
+                            }
+                            w.scroll_top = new_scroll.max(1);
+                            self.needs_render = true;
+                        }
                     }
                 }
             }
@@ -742,6 +759,7 @@ mod tests {
             search_preview: None,
             viewport_override: false,
             one_shot_normal: false,
+            block_insert: None,
         }
     }
 

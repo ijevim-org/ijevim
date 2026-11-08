@@ -52,6 +52,57 @@ impl Editor {
 
         match key {
             KeyCode::Esc => {
+                // Block insert (`Ctrl-v` + `I`/`A`/`c`): replay the typed text
+                // on every remaining line of the block, as one undo group.
+                if let Some(block) = self.block_insert.take() {
+                    let text = std::mem::take(&mut self.engine.insert_state.accum);
+                    let cursor_before =
+                        self.engine
+                            .insert_state
+                            .start_pos
+                            .unwrap_or(crate::types::Position {
+                                line: block.start_line,
+                                col: block.col,
+                            });
+                    self.engine.insert_state.start_pos = None;
+                    let mod_count = self.engine.buffer.modification_count();
+                    let mut edits = Vec::new();
+                    if !text.is_empty() {
+                        edits.push(crate::undo::Edit {
+                            edit_type: crate::undo::EditType::Insert {
+                                line: cursor_before.line,
+                                col: cursor_before.col,
+                                text: text.clone(),
+                            },
+                            cursor_before,
+                            cursor_after: cursor_before,
+                            modification_count: mod_count,
+                        });
+                        let last = self.engine.buffer.content_line_count();
+                        for line in (block.start_line + 1)..=block.end_line.min(last) {
+                            let col = block.col.min(self.engine.buffer.line_content_len(line));
+                            self.engine.buffer.insert(line, col, &text);
+                            edits.push(crate::undo::Edit {
+                                edit_type: crate::undo::EditType::Insert {
+                                    line,
+                                    col,
+                                    text: text.clone(),
+                                },
+                                cursor_before,
+                                cursor_after: crate::types::Position { line, col },
+                                modification_count: mod_count,
+                            });
+                        }
+                        self.engine.state.cursor = crate::types::Position {
+                            line: block.start_line,
+                            col: block.col,
+                        };
+                    }
+                    self.push_undo_group(edits);
+                    self.transition_mode(Mode::Normal);
+                    self.needs_render = true;
+                    return;
+                }
                 // Push accumulated insert text as a single undo group
                 if !self.engine.insert_state.accum.is_empty() {
                     let text = std::mem::take(&mut self.engine.insert_state.accum);

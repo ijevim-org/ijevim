@@ -386,16 +386,21 @@ impl Editor {
         let len = content_len(&chars);
 
         if forward {
-            for i in (col + 1)..len {
-                if chars[i] == ch {
-                    self.engine.state.cursor.col = if till { i.saturating_sub(1) } else { i };
+            for (offset, &c) in chars[col + 1..len].iter().enumerate() {
+                if c == ch {
+                    let i = col + 1 + offset;
+                    self.engine.state.cursor.col = if till { i - 1 } else { i };
                     return true;
                 }
             }
         } else {
-            for i in (0..col.min(len)).rev() {
-                if chars[i] == ch {
-                    self.engine.state.cursor.col = if till { (i + 1).min(len.saturating_sub(1)) } else { i };
+            for (i, &c) in chars[..col.min(len)].iter().enumerate().rev() {
+                if c == ch {
+                    self.engine.state.cursor.col = if till {
+                        (i + 1).min(len.saturating_sub(1))
+                    } else {
+                        i
+                    };
                     return true;
                 }
             }

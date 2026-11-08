@@ -213,7 +213,11 @@ impl Renderer {
             .chars()
             .nth(before.chars().count())
             .unwrap_or(' ');
-        let ch = if ch.width().unwrap_or(0) == 0 { ' ' } else { ch };
+        let ch = if ch.width().unwrap_or(0) == 0 {
+            ' '
+        } else {
+            ch
+        };
         self.screen.set_cell(
             row,
             col,
@@ -357,11 +361,9 @@ impl Renderer {
                 Vec::new()
             };
             // `incsearch` preview: only the match the search would jump to.
-            let incsearch_range: Option<(usize, usize)> = state.incsearch_match.and_then(
-                |(line, start, end)| {
-                    (line == vline.buffer_line).then_some((start, end))
-                },
-            );
+            let incsearch_range: Option<(usize, usize)> = state
+                .incsearch_match
+                .and_then(|(line, start, end)| (line == vline.buffer_line).then_some((start, end)));
             let selection = self.selection_line_range(state, buffer, vline.buffer_line);
 
             for (col, (ch, style)) in vline.styled_chars.iter().enumerate() {

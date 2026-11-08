@@ -146,7 +146,9 @@ impl Editor {
                         self.needs_render = true;
                     }
                     _ => {
-                        if let Some(query) = cmd.strip_prefix('/') {
+                        if let Some((range, rest)) = self.split_ex_range(cmd) {
+                            self.handle_ex_range(range, rest);
+                        } else if let Some(query) = cmd.strip_prefix('/') {
                             if !committed_preview {
                                 let direction = SearchDirection::Forward;
                                 self.do_search(query, direction);
@@ -221,7 +223,9 @@ impl Editor {
                     self.needs_render = true;
                 }
             }
-            KeyCode::Esc | KeyCode::Char('c') if key == KeyCode::Esc || modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Esc | KeyCode::Char('c')
+                if key == KeyCode::Esc || modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 self.cancel_search_preview();
                 self.engine.state.command_buffer.clear();
                 self.engine.state.command_cursor_pos = 0;
@@ -313,7 +317,9 @@ impl Editor {
             }
             // Ctrl-k: delete from cursor to end
             KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.engine.state.command_buffer
+                self.engine
+                    .state
+                    .command_buffer
                     .truncate(self.engine.state.command_cursor_pos);
                 self.update_search_preview();
                 self.needs_render = true;
@@ -876,6 +882,88 @@ impl Editor {
                 format!("File not found in this branch: {}", path_str),
             );
         }
+    }
+}
+
+/// Commands that accept a leading Ex range in this editor.
+fn is_range_command(rest: &str) -> bool {
+    matches!(rest, "d" | "y" | ">" | "<") || rest.starts_with("s/")
+}
+
+impl Editor {
+    /// Split a leading Ex range off `cmd`.
+    ///
+    /// Supports `'<,'>`, `%`, `N`, `N,M`, `.`, `$` and combinations. Returns
+    /// the resolved inclusive line range and the command that follows it.
+    fn split_ex_range<'a>(&self, cmd: &'a str) -> Option<((usize, usize), &'a str)> {
+        let line_count = self.engine.buffer.content_line_count().max(1);
+        if let Some(rest) = cmd.strip_prefix("'<,'>") {
+            let start = self
+                .engine
+                .state
+                .last_visual_start
+                .map(|p| p.line)
+                .unwrap_or(self.engine.state.cursor.line)
+                .clamp(1, line_count);
+            let end = self
+                .engine
+                .state
+                .last_visual_end
+                .or(self.engine.state.last_visual_start)
+                .map(|p| p.line)
+                .unwrap_or(self.engine.state.cursor.line)
+                .clamp(1, line_count);
+            let rest = rest.trim_start();
+            return is_range_command(rest).then_some(((start.min(end), start.max(end)), rest));
+        }
+
+        // The command starts at the first letter or `>`/`<`; everything
+        // before it must look like a range.
+        let idx = cmd
+            .char_indices()
+            .find(|(_, c)| c.is_ascii_alphabetic() || matches!(c, '>' | '<'))?
+            .0;
+        if idx == 0 {
+            return None;
+        }
+        let spec = cmd[..idx].trim();
+        if spec.is_empty() {
+            return None;
+        }
+        let rest = cmd[idx..].trim_start();
+        if !is_range_command(rest) {
+            return None;
+        }
+        let range = parse_line_range(spec, self.engine.state.cursor.line, line_count)?;
+        Some((range, rest))
+    }
+
+    /// Run a range command (`d`, `y`, `>`, `<`, `s/...`).
+    fn handle_ex_range(&mut self, range: (usize, usize), rest: &str) {
+        let (start, end) = range;
+        match rest {
+            "d" => {
+                if start <= end {
+                    self.delete_lines_range('"', start, end);
+                }
+            }
+            "y" => {
+                if start <= end {
+                    self.yank_lines_range('"', start, end);
+                }
+            }
+            ">" => self.indent_lines(start, end, true),
+            "<" => self.indent_lines(start, end, false),
+            _ if rest.starts_with("s/") => {
+                self.handle_substitute(&format!("{start},{end}{rest}"));
+            }
+            _ => {
+                self.engine
+                    .state
+                    .push_message(MessageLevel::Warning, format!("Unknown command: {}", rest));
+            }
+        }
+        self.needs_render = true;
     }
 }
 

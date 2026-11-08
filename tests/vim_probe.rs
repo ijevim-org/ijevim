@@ -1,7 +1,7 @@
 //! Temporary differential probe against real Vim.
 //!
 //! Reads `PROBE_TEXT` (buffer contents) and `PROBE_KEYS` (a key sequence with
-//! `<Esc>`, `<Enter>`, `<BS>` tokens) from the environment, applies the keys in
+//! `<Esc>`, `<Enter>`, `<BS>` and `<C-x>` tokens) from the environment, applies the keys in
 //! Vim keymap mode, then writes the buffer to `PROBE_OUT` and
 //! `<line> <col>` to `PROBE_POS`.
 //!
@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ijevim::editor::Editor;
 use ijevim::types::Keymap;
 
-fn parse_keys(keys: &str) -> Vec<KeyCode> {
+fn parse_keys(keys: &str) -> Vec<(KeyCode, KeyModifiers)> {
     let mut out = Vec::new();
     let mut chars = keys.chars().peekable();
     while let Some(c) = chars.next() {
@@ -26,23 +26,38 @@ fn parse_keys(keys: &str) -> Vec<KeyCode> {
                 token.push(d);
             }
             if closed {
-                match token.as_str() {
-                    "Esc" => out.push(KeyCode::Esc),
-                    "Enter" | "CR" => out.push(KeyCode::Enter),
-                    "BS" => out.push(KeyCode::Backspace),
-                    "Tab" => out.push(KeyCode::Tab),
-                    "Space" => out.push(KeyCode::Char(' ')),
-                    other => panic!("unsupported key token: <{}>", other),
+                let ctrl = token
+                    .strip_prefix("C-")
+                    .or_else(|| token.strip_prefix("c-"))
+                    .and_then(|rest| {
+                        let mut it = rest.chars();
+                        match (it.next(), it.next()) {
+                            (Some(c), None) => Some(c),
+                            _ => None,
+                        }
+                    });
+                if let Some(c) = ctrl {
+                    out.push((KeyCode::Char(c), KeyModifiers::CONTROL));
+                } else {
+                    let code = match token.as_str() {
+                        "Esc" => KeyCode::Esc,
+                        "Enter" | "CR" => KeyCode::Enter,
+                        "BS" => KeyCode::Backspace,
+                        "Tab" => KeyCode::Tab,
+                        "Space" => KeyCode::Char(' '),
+                        other => panic!("unsupported key token: <{}>", other),
+                    };
+                    out.push((code, KeyModifiers::NONE));
                 }
                 continue;
             }
-            out.push(KeyCode::Char('<'));
+            out.push((KeyCode::Char('<'), KeyModifiers::NONE));
             for d in token.chars() {
-                out.push(KeyCode::Char(d));
+                out.push((KeyCode::Char(d), KeyModifiers::NONE));
             }
             continue;
         }
-        out.push(KeyCode::Char(c));
+        out.push((KeyCode::Char(c), KeyModifiers::NONE));
     }
     out
 }
@@ -57,8 +72,8 @@ async fn probe() {
     let keys = std::env::var("PROBE_KEYS").unwrap_or_default();
     let mut ed = Editor::new_headless_for_test(Keymap::Vim).expect("headless editor");
     ed.set_buffer_for_test(&text);
-    for key in parse_keys(&keys) {
-        ed.handle_key_for_test(key, KeyModifiers::NONE).await;
+    for (key, modifiers) in parse_keys(&keys) {
+        ed.handle_key_for_test(key, modifiers).await;
     }
     let (buf, line, col, _mode) = ed.snapshot_for_test();
     if let Ok(path) = std::env::var("PROBE_OUT") {

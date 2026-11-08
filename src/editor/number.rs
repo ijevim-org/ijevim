@@ -27,7 +27,9 @@ impl Editor {
             return;
         };
         let old: String = chars[token.start..token.end].iter().collect();
-        let shifted = token.value.saturating_add(delta.saturating_mul(count as i64));
+        let shifted = token
+            .value
+            .saturating_add(delta.saturating_mul(count as i64));
         let new = format_number(shifted, &token);
         let cursor_after = Position {
             line,
@@ -74,7 +76,8 @@ fn find_number(chars: &[char], col: usize) -> Option<NumberToken> {
 fn scan(chars: &[char], from: usize, to: usize) -> Option<NumberToken> {
     let mut i = from;
     while i < to {
-        if chars[i].is_ascii_digit() || (chars[i] == '-' && i + 1 < to && chars[i + 1].is_ascii_digit())
+        if chars[i].is_ascii_digit()
+            || (chars[i] == '-' && i + 1 < to && chars[i + 1].is_ascii_digit())
         {
             if let Some(token) = parse_token(chars, i, to) {
                 return Some(token);
