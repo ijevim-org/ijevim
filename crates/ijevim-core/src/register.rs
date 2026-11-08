@@ -1,8 +1,33 @@
 use std::collections::HashMap;
 use std::io;
 
+/// How the text in a register should be pasted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RegisterKind {
+    /// Paste inline at the cursor column.
+    #[default]
+    Char,
+    /// Insert whole lines above/below the cursor line.
+    Line,
+    /// Insert a rectangle starting at the cursor column.
+    Block,
+}
+
+impl RegisterKind {
+    /// Infer the kind from the raw text: a trailing newline marks linewise.
+    fn from_text(text: &str) -> Self {
+        if text.ends_with('\n') {
+            Self::Line
+        } else {
+            Self::Char
+        }
+    }
+}
+
 pub struct Register {
     registers: HashMap<char, String>,
+    /// Paste kind per register. Missing entries fall back to `RegisterKind::from_text`.
+    kinds: HashMap<char, RegisterKind>,
     /// Numbered registers 0-9: 0 = last yank, 1-9 = last 9 deletions.
     numbered: [String; 10],
     /// Small-delete register: stores single-line deletions.
@@ -21,6 +46,7 @@ impl Register {
 
         Self {
             registers,
+            kinds: HashMap::new(),
             numbered: Default::default(),
             small_delete: String::new(),
             default_register: '"',
@@ -28,6 +54,12 @@ impl Register {
     }
 
     pub fn set(&mut self, name: char, content: &str) {
+        let kind = RegisterKind::from_text(content);
+        self.set_with_kind(name, content, kind);
+    }
+
+    /// Store `content` with an explicit paste kind (blockwise yanks).
+    pub fn set_with_kind(&mut self, name: char, content: &str, kind: RegisterKind) {
         let reg = name.to_ascii_lowercase();
 
         // Uppercase register names append (Vim: `"Ayy` appends to register a).
@@ -40,11 +72,13 @@ impl Register {
         };
 
         self.registers.insert(reg, value.clone());
+        self.kinds.insert(reg, kind);
 
         // Named registers mirror the unnamed register so `p` works right after
         // `"ayy`, matching Vim.
         if reg != '"' {
             self.registers.insert('"', value.clone());
+            self.kinds.insert('"', kind);
         }
 
         if reg == '"' || reg == '+' {
@@ -88,6 +122,24 @@ impl Register {
         }
         let reg = name.to_ascii_lowercase();
         self.registers.get(&reg).cloned().unwrap_or_default()
+    }
+
+    /// Paste kind recorded for `name`.
+    pub fn kind(&self, name: char) -> RegisterKind {
+        let reg = name.to_ascii_lowercase();
+        self.kinds
+            .get(&reg)
+            .copied()
+            .unwrap_or_else(|| RegisterKind::from_text(&self.get(name)))
+    }
+
+    /// Width of a blockwise register: the longest line it holds.
+    pub fn block_width(&self, name: char) -> usize {
+        self.get(name)
+            .split('\n')
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn get_default(&self) -> String {

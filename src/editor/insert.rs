@@ -30,8 +30,79 @@ impl Editor {
             }
         }
 
+        // Ctrl-v: insert the next key literally (no completion, no mapping).
+        if self.engine.insert_state.waiting_literal {
+            self.engine.insert_state.waiting_literal = false;
+            let text = match key {
+                KeyCode::Char(c) => c.to_string(),
+                KeyCode::Tab => "\t".to_string(),
+                _ => {
+                    self.needs_render = true;
+                    return;
+                }
+            };
+            let line = self.engine.state.cursor.line;
+            let col = self.engine.state.cursor.col;
+            self.engine.buffer.insert(line, col, &text);
+            self.engine.state.cursor.col += text.chars().count();
+            self.engine.insert_state.accum.push_str(&text);
+            self.on_buffer_modified();
+            return;
+        }
+
         match key {
             KeyCode::Esc => {
+                // Block insert (`Ctrl-v` + `I`/`A`/`c`): replay the typed text
+                // on every remaining line of the block, as one undo group.
+                if let Some(block) = self.block_insert.take() {
+                    let text = std::mem::take(&mut self.engine.insert_state.accum);
+                    let cursor_before =
+                        self.engine
+                            .insert_state
+                            .start_pos
+                            .unwrap_or(crate::types::Position {
+                                line: block.start_line,
+                                col: block.col,
+                            });
+                    self.engine.insert_state.start_pos = None;
+                    let mod_count = self.engine.buffer.modification_count();
+                    let mut edits = Vec::new();
+                    if !text.is_empty() {
+                        edits.push(crate::undo::Edit {
+                            edit_type: crate::undo::EditType::Insert {
+                                line: cursor_before.line,
+                                col: cursor_before.col,
+                                text: text.clone(),
+                            },
+                            cursor_before,
+                            cursor_after: cursor_before,
+                            modification_count: mod_count,
+                        });
+                        let last = self.engine.buffer.content_line_count();
+                        for line in (block.start_line + 1)..=block.end_line.min(last) {
+                            let col = block.col.min(self.engine.buffer.line_content_len(line));
+                            self.engine.buffer.insert(line, col, &text);
+                            edits.push(crate::undo::Edit {
+                                edit_type: crate::undo::EditType::Insert {
+                                    line,
+                                    col,
+                                    text: text.clone(),
+                                },
+                                cursor_before,
+                                cursor_after: crate::types::Position { line, col },
+                                modification_count: mod_count,
+                            });
+                        }
+                        self.engine.state.cursor = crate::types::Position {
+                            line: block.start_line,
+                            col: block.cursor_col,
+                        };
+                    }
+                    self.push_undo_group(edits);
+                    self.transition_mode(Mode::Normal);
+                    self.needs_render = true;
+                    return;
+                }
                 // Push accumulated insert text as a single undo group
                 if !self.engine.insert_state.accum.is_empty() {
                     let text = std::mem::take(&mut self.engine.insert_state.accum);
@@ -117,6 +188,19 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    /// Ctrl-t / Ctrl-d in Insert mode: indent or dedent the current line and
+    /// keep the cursor at the same offset within the line.
+    pub(crate) fn insert_indent(&mut self, indent: bool) {
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let before_len = self.engine.buffer.line_content_len(line);
+        self.indent_lines(line, line, indent);
+        let after_len = self.engine.buffer.line_content_len(line);
+        let cursor = (col as isize + (after_len as isize - before_len as isize)).max(0) as usize;
+        self.engine.state.cursor.col = cursor.min(after_len);
+        self.needs_render = true;
     }
 
     /// Delete from cursor to beginning of the current word (Ctrl-w in Insert mode).
@@ -246,6 +330,16 @@ impl Editor {
     pub(crate) async fn handle_replace(&mut self, key: KeyCode) {
         match key {
             KeyCode::Esc => {
+                if self.engine.operator_state.replace_char == Some('\0')
+                    && self.engine.state.visual_start.is_some()
+                {
+                    self.engine.operator_state.replace_char = None;
+                    self.engine.state.visual_start = None;
+                    self.engine.state.visual_type = None;
+                    self.transition_mode(Mode::Normal);
+                    self.needs_render = true;
+                    return;
+                }
                 // Flush accumulated Replace mode edits as a single undo group.
                 if !self.engine.replace_undo_group.is_empty() {
                     let edits = std::mem::take(&mut self.engine.replace_undo_group);
@@ -264,6 +358,9 @@ impl Editor {
             KeyCode::Char(c) => {
                 // ── Single-char replace (r{char}) ─────────────────
                 if self.engine.operator_state.replace_char == Some('\0') {
+                    if self.engine.state.visual_start.is_some() {
+                        return self.visual_replace_char(c);
+                    }
                     return self.handle_replace_inline_char(c);
                 }
 
@@ -305,6 +402,9 @@ impl Editor {
             KeyCode::Enter => {
                 // Enter during single-char replace acts like Char('\n')
                 if self.engine.operator_state.replace_char == Some('\0') {
+                    if self.engine.state.visual_start.is_some() {
+                        return self.visual_replace_char('\n');
+                    }
                     return self.handle_replace_inline_char('\n');
                 }
                 let line = self.engine.state.cursor.line;

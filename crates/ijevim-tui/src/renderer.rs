@@ -14,6 +14,8 @@ const CURRENT_LINE_BG: Color = Color::AnsiValue(235);
 const VISUAL_SELECTION_BG: Color = Color::AnsiValue(237);
 /// Background for `hlsearch` matches.
 const SEARCH_MATCH_BG: Color = Color::AnsiValue(58);
+/// Background for the incremental-search match under the cursor.
+const INCSEARCH_MATCH_BG: Color = Color::AnsiValue(94);
 const STATUS_BAR_BG: Color = Color::AnsiValue(236);
 const STATUS_INFO_BG: Color = Color::AnsiValue(21);
 const STATUS_WARN_BG: Color = Color::AnsiValue(226);
@@ -165,6 +167,16 @@ impl Renderer {
             0
         };
 
+        // In Command mode the cursor belongs on the status line.
+        if state.mode == Mode::Command {
+            self.position_command_cursor(rows, cols, state);
+            let ansi_output = self.screen.render();
+            if !ansi_output.is_empty() {
+                terminal.write_raw(ansi_output.as_bytes())?;
+            }
+            return Ok(());
+        }
+
         // Position visual cursor at focused window's cursor position.
         if let Some(focused_window) = window_layout.windows.get(window_layout.focused) {
             // Select the buffer shown in the focused window (same logic as render_window).
@@ -187,6 +199,35 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    /// Put the block cursor inside the command line on the status row.
+    fn position_command_cursor(&mut self, rows: usize, cols: usize, state: &EditorState) {
+        let row = rows.saturating_sub(1);
+        let pos = state.command_cursor_pos.min(state.command_buffer.len());
+        let before = &state.command_buffer[..pos];
+        let width: usize = before.chars().map(|c| c.width().unwrap_or(0)).sum();
+        let col = (1 + width).min(cols.saturating_sub(1));
+        let ch = state
+            .command_buffer
+            .chars()
+            .nth(before.chars().count())
+            .unwrap_or(' ');
+        let ch = if ch.width().unwrap_or(0) == 0 {
+            ' '
+        } else {
+            ch
+        };
+        self.screen.set_cell(
+            row,
+            col,
+            ch,
+            CellStyle {
+                fg: CURSOR_FG,
+                bg: CURSOR_BG,
+                ..CellStyle::default()
+            },
+        );
     }
 
     /// Render a single window into its viewport.
@@ -319,6 +360,10 @@ impl Renderer {
             } else {
                 Vec::new()
             };
+            // `incsearch` preview: only the match the search would jump to.
+            let incsearch_range: Option<(usize, usize)> = state
+                .incsearch_match
+                .and_then(|(line, start, end)| (line == vline.buffer_line).then_some((start, end)));
             let selection = self.selection_line_range(state, buffer, vline.buffer_line);
 
             for (col, (ch, style)) in vline.styled_chars.iter().enumerate() {
@@ -334,6 +379,10 @@ impl Renderer {
                     };
                     if selected {
                         cell_style.bg = VISUAL_SELECTION_BG;
+                    } else if incsearch_range
+                        .is_some_and(|(start, end)| buf_col >= start && buf_col < end)
+                    {
+                        cell_style.bg = INCSEARCH_MATCH_BG;
                     } else if search_ranges
                         .iter()
                         .any(|(start, end)| buf_col >= *start && buf_col < *end)
@@ -346,6 +395,7 @@ impl Renderer {
                         && vline.buffer_line == window.cursor.line
                         && !selected
                         && cell_style.bg != SEARCH_MATCH_BG
+                        && cell_style.bg != INCSEARCH_MATCH_BG
                     {
                         cell_style.bg = CURRENT_LINE_BG;
                     }
@@ -548,7 +598,7 @@ impl Renderer {
     /// Render global status bar at the bottom.
     fn render_status_bar(&mut self, rows: usize, cols: usize, state: &EditorState) {
         let status_row = rows.saturating_sub(1);
-        let is_show_message = state.last_message.is_some();
+        let is_show_message = state.mode != Mode::Command && state.last_message.is_some();
         let status_style = if is_show_message {
             let level = state
                 .message_history
@@ -583,7 +633,14 @@ impl Renderer {
             }
         };
 
-        let text = if let Some(ref msg) = state.last_message {
+        let text = if state.mode == Mode::Command {
+            let mut line = format!(":{}", state.command_buffer);
+            if let Some(hint) = state.command_hint.as_deref() {
+                line.push_str("  ");
+                line.push_str(hint);
+            }
+            line
+        } else if let Some(ref msg) = state.last_message {
             format!(" {} ", msg)
         } else if state.has_confirmation() {
             state
@@ -591,8 +648,6 @@ impl Renderer {
                 .as_ref()
                 .map(|c| c.message.clone())
                 .unwrap_or_default()
-        } else if state.mode == Mode::Command {
-            format!(":{}", state.command_buffer)
         } else if state.show_dashboard {
             " DASHBOARD ".to_string()
         } else {

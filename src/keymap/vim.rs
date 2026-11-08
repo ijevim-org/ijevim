@@ -27,6 +27,28 @@ impl KeymapHandler for VimKeymap {
         Box::pin(async move {
             editor.emit_key_event(key, modifiers);
 
+            // Ctrl-o in Insert mode: run one Normal-mode command, then return
+            // to Insert. Keep routing to Normal until any pending operator
+            // (count, operator, `g`, Ctrl-w) completes.
+            if editor.one_shot_normal {
+                editor.one_shot_normal = false;
+                let was_insert = editor.engine.state.mode == Mode::Insert;
+                editor.handle_normal(key).await;
+                let pending = !matches!(
+                    editor.engine.operator_state.pending,
+                    crate::types::PendingOperator::Idle
+                ) || editor.engine.operator_state.count.is_some()
+                    || editor.engine.operator_state.pending_g
+                    || editor.engine.operator_state.ctrl_w_prefix;
+                if pending {
+                    editor.one_shot_normal = true;
+                } else if was_insert && editor.engine.state.mode == Mode::Normal {
+                    editor.transition_mode(Mode::Insert);
+                }
+                editor.needs_render = true;
+                return;
+            }
+
             if modifiers.contains(KeyModifiers::CONTROL) {
                 match editor.engine.state.mode {
                     Mode::Normal => match key {
@@ -75,6 +97,18 @@ impl KeymapHandler for VimKeymap {
                             editor.needs_render = true;
                             return;
                         }
+                        KeyCode::Char('a') => {
+                            // Ctrl-a: increment the number under the cursor.
+                            let count = editor.take_count();
+                            editor.increment_number(1, count);
+                            return;
+                        }
+                        KeyCode::Char('x') => {
+                            // Ctrl-x: decrement the number under the cursor.
+                            let count = editor.take_count();
+                            editor.increment_number(-1, count);
+                            return;
+                        }
                         KeyCode::Char('v') => {
                             // Ctrl-v: enter visual block mode
                             let prev_mode = editor.engine.state.mode;
@@ -93,8 +127,26 @@ impl KeymapHandler for VimKeymap {
                         _ => {}
                     },
                     Mode::Insert | Mode::Replace => match key {
+                        KeyCode::Char('t') => {
+                            // Ctrl-t: indent the current line.
+                            editor.insert_indent(true);
+                            return;
+                        }
                         KeyCode::Char('d') => {
-                            editor.insert_delete_to_bol();
+                            // Ctrl-d: dedent the current line.
+                            editor.insert_indent(false);
+                            return;
+                        }
+                        KeyCode::Char('o') => {
+                            // Ctrl-o: run one Normal-mode command.
+                            editor.one_shot_normal = true;
+                            editor.needs_render = true;
+                            return;
+                        }
+                        KeyCode::Char('v') => {
+                            // Ctrl-v: insert the next character literally.
+                            editor.engine.insert_state.waiting_literal = true;
+                            editor.needs_render = true;
                             return;
                         }
                         KeyCode::Char('w') => {
@@ -114,7 +166,14 @@ impl KeymapHandler for VimKeymap {
                         }
                         _ => {}
                     },
-                    Mode::Command | Mode::Visual => {}
+                    Mode::Visual => {
+                        if let KeyCode::Char('v') = key {
+                            editor.engine.state.visual_type = Some(crate::types::VisualType::Block);
+                            editor.needs_render = true;
+                            return;
+                        }
+                    }
+                    Mode::Command => {}
                 }
             }
 

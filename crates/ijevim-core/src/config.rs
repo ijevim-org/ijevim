@@ -11,6 +11,8 @@ pub struct Config {
     pub show_relative_numbers: bool,
     /// Enable soft line wrapping.
     pub wrap: bool,
+    /// Preview search matches while typing the pattern.
+    pub incsearch: bool,
 }
 
 impl Default for Config {
@@ -20,6 +22,7 @@ impl Default for Config {
             show_line_numbers: true,
             show_relative_numbers: false,
             wrap: true,
+            incsearch: true,
         }
     }
 }
@@ -93,6 +96,16 @@ impl Config {
             }
         }
 
+        if let Some(v) = table.get("incsearch") {
+            match v.as_bool() {
+                Some(b) => out.incsearch = b,
+                None => eprintln!(
+                    "[config] Ignoring 'incsearch' in {}: not a bool",
+                    path.display()
+                ),
+            }
+        }
+
         out
     }
 }
@@ -121,6 +134,7 @@ mod tests {
         assert_eq!(cfg.keymap, "vim");
         assert!(cfg.show_line_numbers);
         assert!(cfg.wrap);
+        assert!(cfg.incsearch);
     }
 
     #[test]
