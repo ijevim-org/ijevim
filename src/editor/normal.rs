@@ -742,6 +742,15 @@ impl Editor {
                 KeyCode::Char('e') => {
                     self.yank_word_end(register, count, false);
                 }
+                KeyCode::Char('l') | KeyCode::Char(' ') => {
+                    let col = self.engine.state.cursor.col;
+                    let end = col + count.max(1);
+                    self.yank_cols(register, col, end);
+                }
+                KeyCode::Char('h') => {
+                    let col = self.engine.state.cursor.col;
+                    self.yank_cols(register, col.saturating_sub(count.max(1)), col);
+                }
                 KeyCode::Char('E') => {
                     self.yank_word_end(register, count, true);
                 }
@@ -819,6 +828,14 @@ impl Editor {
                 KeyCode::Char('e') => {
                     self.delete_word_end(register, count, false);
                 }
+                KeyCode::Char('l') | KeyCode::Char(' ') => {
+                    let col = self.engine.state.cursor.col;
+                    self.delete_cols(register, col, col + count.max(1));
+                }
+                KeyCode::Char('h') => {
+                    let col = self.engine.state.cursor.col;
+                    self.delete_cols(register, col.saturating_sub(count.max(1)), col);
+                }
                 KeyCode::Char('E') => {
                     self.delete_word_end(register, count, true);
                 }
@@ -883,6 +900,16 @@ impl Editor {
                 }
                 KeyCode::Char('e') => {
                     self.delete_word_end(register, count, false);
+                    self.enter_insert_after_change();
+                }
+                KeyCode::Char('l') | KeyCode::Char(' ') => {
+                    let col = self.engine.state.cursor.col;
+                    self.delete_cols(register, col, col + count.max(1));
+                    self.enter_insert_after_change();
+                }
+                KeyCode::Char('h') => {
+                    let col = self.engine.state.cursor.col;
+                    self.delete_cols(register, col.saturating_sub(count.max(1)), col);
                     self.enter_insert_after_change();
                 }
                 KeyCode::Char('E') => {
@@ -1590,8 +1617,7 @@ impl Editor {
         mod_count: usize,
     ) -> Vec<Edit> {
         let mut edits = Vec::new();
-        let mut target = line;
-        for seg in content.split('\n') {
+        for (target, seg) in (line..).zip(content.split('\n')) {
             let len = self.engine.buffer.line_content_len(target);
             let at = col.min(len);
             let text = format!("{}{}", " ".repeat(col.saturating_sub(len)), seg);
@@ -1606,7 +1632,6 @@ impl Editor {
                 cursor_after: self.engine.state.cursor,
                 modification_count: mod_count,
             });
-            target += 1;
         }
         edits
     }

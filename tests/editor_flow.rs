@@ -2798,3 +2798,132 @@ async fn block_insert_undoes_as_one_change() {
     let (buf, _, _, _) = ed.snapshot_for_test();
     assert_eq!(buf, "abc\ndef\n");
 }
+
+// ── Operator + h/l motions ───────────────────────────────────────
+
+#[tokio::test]
+async fn yank_char_with_l_motion_copies_one_char() {
+    let mut ed = test_vim_editor("abcdef\n");
+    type_keys(&mut ed, "ylP").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "aabcdef\n");
+}
+
+#[tokio::test]
+async fn yank_char_honours_the_count() {
+    let mut ed = test_vim_editor("abcdef\n");
+    type_keys(&mut ed, "y2lP").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "ababcdef\n");
+}
+
+#[tokio::test]
+async fn delete_char_before_cursor_with_dh() {
+    let mut ed = test_vim_editor("abcdef\n");
+    type_keys(&mut ed, "llldh").await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abdef\n");
+    assert_eq!((line, col), (1, 2));
+}
+
+#[tokio::test]
+async fn delete_char_under_cursor_with_dl() {
+    let mut ed = test_vim_editor("abcdef\n");
+    type_keys(&mut ed, "lld2l").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abef\n");
+}
+
+#[tokio::test]
+async fn change_char_with_cl_enters_insert_mode() {
+    let mut ed = test_vim_editor("abcdef\n");
+    type_keys(&mut ed, "llclZ").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, _, _, mode) = ed.snapshot_for_test();
+    assert_eq!(buf, "abZdef\n");
+    assert_eq!(mode, Mode::Normal);
+}
+
+// ── Blockwise yank / put and X / D ───────────────────────────────
+
+#[tokio::test]
+async fn block_yank_and_put_copies_the_rectangle() {
+    let mut ed = test_vim_editor("abcdef\nghijkl\nmnopqr\nstuvwx\n");
+    type_keys(&mut ed, "ll").await;
+    ed.handle_key_for_test(KeyCode::Char('v'), KeyModifiers::CONTROL)
+        .await;
+    type_keys(&mut ed, "jlYjj").await;
+    ed.handle_key_for_test(KeyCode::Char('v'), KeyModifiers::CONTROL)
+        .await;
+    type_keys(&mut ed, "jlP").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abcdef\nghijkl\nmncdqr\nstijwx\n");
+}
+
+#[tokio::test]
+async fn block_put_pads_short_lines() {
+    let mut ed = test_vim_editor("abcdef\nghijkl\nxy\n");
+    type_keys(&mut ed, "ll").await;
+    ed.handle_key_for_test(KeyCode::Char('v'), KeyModifiers::CONTROL)
+        .await;
+    type_keys(&mut ed, "jlYjjp").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abcdef\nghijkl\nxycd\n  ij");
+}
+
+#[tokio::test]
+async fn block_x_deletes_the_rectangle() {
+    let mut ed = test_vim_editor("abcdef\nghijkl\n");
+    type_keys(&mut ed, "ll").await;
+    ed.handle_key_for_test(KeyCode::Char('v'), KeyModifiers::CONTROL)
+        .await;
+    type_keys(&mut ed, "jlX").await;
+
+    let (buf, _, _, mode) = ed.snapshot_for_test();
+    assert_eq!(buf, "abef\nghkl\n");
+    assert_eq!(mode, Mode::Normal);
+}
+
+#[tokio::test]
+async fn block_d_truncates_every_selected_line() {
+    let mut ed = test_vim_editor("abcdef\nghijkl\n");
+    type_keys(&mut ed, "ll").await;
+    ed.handle_key_for_test(KeyCode::Char('v'), KeyModifiers::CONTROL)
+        .await;
+    type_keys(&mut ed, "jlD").await;
+
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "ab\ngh\n");
+}
+
+#[tokio::test]
+async fn block_append_lands_on_the_block_left_edge() {
+    let mut ed = test_vim_editor("abcdef\nghijkl\n");
+    type_keys(&mut ed, "ll").await;
+    ed.handle_key_for_test(KeyCode::Char('v'), KeyModifiers::CONTROL)
+        .await;
+    type_keys(&mut ed, "jAX").await;
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abcXdef\nghiXjkl\n");
+    assert_eq!((line, col), (1, 2));
+}
+
+#[tokio::test]
+async fn visual_put_with_an_empty_register_returns_to_normal() {
+    let mut ed = test_vim_editor("abc\n");
+    ed.engine.register.set('"', "");
+    type_keys(&mut ed, "vlp").await;
+
+    let (buf, _, _, mode) = ed.snapshot_for_test();
+    assert_eq!(buf, "abc\n");
+    assert_eq!(mode, Mode::Normal);
+}

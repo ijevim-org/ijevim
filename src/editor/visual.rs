@@ -882,6 +882,8 @@ impl Editor {
         let register = self.visual_register();
         let content = self.engine.register.get(register);
         if content.is_empty() {
+            // Vim leaves Visual mode even when the register is empty.
+            self.exit_visual(Mode::Normal);
             return;
         }
         let kind = self.engine.register.kind(register);
