@@ -19,6 +19,45 @@ fn point_after(start: Position, text: &str) -> Position {
     pos
 }
 
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn capitalize_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at_word_start = true;
+    for c in text.chars() {
+        if c.is_alphabetic() {
+            if at_word_start {
+                out.extend(c.to_uppercase());
+                at_word_start = false;
+            } else {
+                out.extend(c.to_lowercase());
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+enum CaseKind {
+    Upper,
+    Lower,
+    Capitalize,
+}
+
+impl CaseKind {
+    fn apply(self, text: &str) -> String {
+        match self {
+            CaseKind::Upper => text.to_uppercase(),
+            CaseKind::Lower => text.to_lowercase(),
+            CaseKind::Capitalize => capitalize_text(text),
+        }
+    }
+}
+
 impl Editor {
     /// Push kill text onto the kill ring, appending when the previous Emacs
     /// command was also a kill.
@@ -348,44 +387,221 @@ impl Editor {
         }
     }
 
-    pub fn kill_word(&mut self) {
-        let line = self.engine.state.cursor.line;
-        let col = self.engine.state.cursor.col;
-        let (_, _, end_col) = self.engine.buffer.get_word_range(line, col);
-        let mod_count = self.engine.buffer.modification_count();
+    /// Span from point to the end of the next word (Emacs `M-d`, `M-u`, ...).
+    ///
+    /// Point inside a word transforms only the remainder; point on whitespace
+    /// skips to the next word first. Returns the start and exclusive end.
+    fn forward_word_bounds(&self, start: Position) -> Option<(Position, Position)> {
+        let last = self.engine.buffer.content_line_count().max(1);
+        let mut line = start.line.clamp(1, last);
+        let mut col = start.col;
+        let mut chars = self.engine.buffer.line_chars(line);
+        let mut len = self.engine.buffer.line_content_len(line);
 
-        if end_col > col {
-            let deleted = self.engine.buffer.delete_range(line, col, line, end_col);
-            if !deleted.is_empty() {
-                self.kill_to_ring(&deleted);
+        let on_word_at_point = col < len && is_word_char(chars[col]);
+        if !on_word_at_point {
+            loop {
+                while col < len && chars[col].is_whitespace() {
+                    col += 1;
+                }
+                if col < len {
+                    break;
+                }
+                if line >= last {
+                    return None;
+                }
+                line += 1;
+                chars = self.engine.buffer.line_chars(line);
+                len = self.engine.buffer.line_content_len(line);
+                col = 0;
             }
-            self.engine.undo_manager.push(Edit {
-                edit_type: EditType::Delete {
-                    line,
-                    col,
-                    text: deleted,
-                },
-                cursor_before: self.engine.state.cursor,
-                cursor_after: self.engine.state.cursor,
-                modification_count: mod_count,
-            });
-            self.on_buffer_modified();
-        } else if line < self.engine.buffer.line_count() {
-            // C-k at end of line joins the next line, like Emacs.
-            let join_col = self.engine.buffer.line_content_len(line).max(col);
-            self.engine.buffer.merge_with_prev_line(line + 1);
-            self.kill_to_ring("\n");
-            self.engine.undo_manager.push(Edit {
-                edit_type: EditType::Merge {
-                    line,
-                    deleted_newline_col: join_col,
-                },
-                cursor_before: self.engine.state.cursor,
-                cursor_after: self.engine.state.cursor,
-                modification_count: mod_count,
-            });
-            self.on_buffer_modified();
         }
+
+        let word_start = Position { line, col };
+        if col < len {
+            if is_word_char(chars[col]) {
+                while col < len && is_word_char(chars[col]) {
+                    col += 1;
+                }
+            } else {
+                // Punctuation: treat the non-space run as the word.
+                while col < len && !chars[col].is_whitespace() {
+                    col += 1;
+                }
+            }
+        }
+
+        let start = if on_word_at_point { start } else { word_start };
+        let end = Position { line, col };
+        if start == end {
+            None
+        } else {
+            Some((start, end))
+        }
+    }
+
+    fn transform_case_span(
+        &mut self,
+        from: Position,
+        to: Position,
+        kind: CaseKind,
+        move_point: bool,
+    ) {
+        let old = self
+            .engine
+            .buffer
+            .get_char_range(from.line, from.col, to.line, to.col);
+        if old.is_empty() {
+            return;
+        }
+        let new = kind.apply(&old);
+        if old == new {
+            if move_point {
+                self.engine.state.cursor = to;
+            }
+            self.needs_render = true;
+            return;
+        }
+
+        let mod_count = self.engine.buffer.modification_count();
+        let cursor_before = self.engine.state.cursor;
+        self.engine
+            .buffer
+            .delete_range(from.line, from.col, to.line, to.col);
+        self.engine.buffer.insert(from.line, from.col, &new);
+        let cursor_after = if move_point {
+            point_after(from, &new)
+        } else {
+            self.engine.state.cursor
+        };
+        self.engine.undo_manager.push(Edit {
+            edit_type: EditType::Replace {
+                line: from.line,
+                col: from.col,
+                old_text: old,
+                new_text: new,
+            },
+            cursor_before,
+            cursor_after,
+            modification_count: mod_count,
+        });
+        if move_point {
+            self.engine.state.cursor = cursor_after;
+        }
+        self.on_buffer_modified();
+        self.needs_render = true;
+    }
+
+    fn case_word(&mut self, kind: CaseKind) {
+        let start = self.engine.state.cursor;
+        if let Some((from, to)) = self.forward_word_bounds(start) {
+            self.transform_case_span(from, to, kind, true);
+        }
+    }
+
+    fn case_region(&mut self, kind: CaseKind) {
+        if !self.has_active_region() {
+            self.engine.state.push_message(
+                MessageLevel::Info,
+                "The mark is not set now, so there is no region".to_string(),
+            );
+            self.needs_render = true;
+            return;
+        }
+        let mark = self.engine.state.mark.unwrap_or_default();
+        let point = self.engine.state.cursor;
+        let (from, to) = if (mark.line, mark.col) <= (point.line, point.col) {
+            (mark, point)
+        } else {
+            (point, mark)
+        };
+        self.transform_case_span(from, to, kind, false);
+    }
+
+    pub fn upcase_word(&mut self) {
+        self.case_word(CaseKind::Upper);
+    }
+
+    pub fn downcase_word(&mut self) {
+        self.case_word(CaseKind::Lower);
+    }
+
+    pub fn capitalize_word(&mut self) {
+        self.case_word(CaseKind::Capitalize);
+    }
+
+    pub fn upcase_region(&mut self) {
+        self.case_region(CaseKind::Upper);
+    }
+
+    pub fn downcase_region(&mut self) {
+        self.case_region(CaseKind::Lower);
+    }
+
+    pub fn kill_word(&mut self) {
+        let point = self.engine.state.cursor;
+        let Some((from, to)) = self.forward_word_bounds(point) else {
+            return;
+        };
+        let deleted = self
+            .engine
+            .buffer
+            .get_char_range(from.line, from.col, to.line, to.col);
+        if deleted.is_empty() {
+            return;
+        }
+        let mod_count = self.engine.buffer.modification_count();
+        self.engine
+            .buffer
+            .delete_range(from.line, from.col, to.line, to.col);
+        self.kill_to_ring(&deleted);
+        self.engine.undo_manager.push(Edit {
+            edit_type: EditType::Delete {
+                line: from.line,
+                col: from.col,
+                text: deleted,
+            },
+            cursor_before: point,
+            cursor_after: from,
+            modification_count: mod_count,
+        });
+        self.engine.state.cursor = from;
+        self.on_buffer_modified();
+        self.needs_render = true;
+    }
+
+    pub fn kill_word_backward(&mut self) {
+        let point = self.engine.state.cursor;
+        let (line, col) = self.word_backward_pos(point.line, point.col, false);
+        let from = Position { line, col };
+        if from == point {
+            return;
+        }
+        let deleted = self
+            .engine
+            .buffer
+            .get_char_range(from.line, from.col, point.line, point.col);
+        if deleted.is_empty() {
+            return;
+        }
+        let mod_count = self.engine.buffer.modification_count();
+        self.engine
+            .buffer
+            .delete_range(from.line, from.col, point.line, point.col);
+        self.kill_to_ring(&deleted);
+        self.engine.undo_manager.push(Edit {
+            edit_type: EditType::Delete {
+                line: from.line,
+                col: from.col,
+                text: deleted,
+            },
+            cursor_before: point,
+            cursor_after: from,
+            modification_count: mod_count,
+        });
+        self.engine.state.cursor = from;
+        self.on_buffer_modified();
+        self.needs_render = true;
     }
 
     pub(crate) fn kill_line(&mut self) {

@@ -1,7 +1,7 @@
 use crate::editor::Editor;
 use crate::keymap::KeymapHandler;
 use crate::types::PluginEvent;
-use crate::types::{MessageLevel, Mode};
+use crate::types::{MessageLevel, Mode, Position};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 pub struct EmacsKeymap;
@@ -141,6 +141,23 @@ impl KeymapHandler for EmacsKeymap {
                 // the prefix commands themselves; consume it so it cannot
                 // leak into the key after the sequence.
                 let _ = take_numeric_arg(editor);
+                if prefix == 'g' {
+                    let handled = match (has_ctrl, key) {
+                        (false, KeyCode::Char('g')) => {
+                            start_command_line_with_text(editor, "goto ");
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !handled {
+                        editor.engine.state.push_message(
+                            MessageLevel::Info,
+                            format!("M-g {} is undefined", describe_key(key, modifiers)),
+                        );
+                        editor.needs_render = true;
+                    }
+                    return;
+                }
                 if prefix == 'x' {
                     let handled = match (has_ctrl, key) {
                         (true, KeyCode::Char('s')) => {
@@ -177,6 +194,14 @@ impl KeymapHandler for EmacsKeymap {
                         }
                         (true, KeyCode::Char('x')) => {
                             editor.exchange_point_and_mark();
+                            true
+                        }
+                        (true, KeyCode::Char('u')) => {
+                            editor.upcase_region();
+                            true
+                        }
+                        (true, KeyCode::Char('l')) => {
+                            editor.downcase_region();
                             true
                         }
                         // `C-x u` and `C-x C-/` are undo in Emacs, not redo.
@@ -262,6 +287,41 @@ impl KeymapHandler for EmacsKeymap {
                     }
                 }
                 return;
+            }
+
+            // ── Dired (directory listing) ──
+            // Emacs dired keys override the normal text bindings here:
+            // Enter visits the entry, `g` reverts, `^` goes up, `q` quits.
+            if editor.engine.buffer.is_directory_listing() && !has_ctrl && !has_alt {
+                let handled = match key {
+                    KeyCode::Enter => {
+                        editor.open_selected_entry();
+                        true
+                    }
+                    KeyCode::Char('g') => {
+                        editor.refresh_directory();
+                        true
+                    }
+                    KeyCode::Char('^') => {
+                        editor.go_up_directory();
+                        true
+                    }
+                    KeyCode::Char('q') => {
+                        if editor.engine.window_layout.windows.len() > 1 {
+                            if let Err(e) = editor.engine.close_focused_window() {
+                                editor.engine.state.push_message(MessageLevel::Error, e);
+                            }
+                        } else if let Err(e) = editor.engine.buffer_delete() {
+                            editor.engine.state.push_message(MessageLevel::Error, e);
+                        }
+                        editor.needs_render = true;
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    return;
+                }
             }
 
             // ── Numeric argument (`C-u`, `M-3`, `M--`) ──
@@ -457,12 +517,12 @@ impl KeymapHandler for EmacsKeymap {
                 (false, KeyCode::Null) => {
                     editor.set_mark();
                 }
-                (false, KeyCode::Backspace) => {
+                (false, KeyCode::Backspace) if !has_alt => {
                     for _ in 0..count {
                         editor.delete_char_backward();
                     }
                 }
-                (false, KeyCode::Delete) => {
+                (false, KeyCode::Delete) if !has_alt => {
                     for _ in 0..count {
                         editor.delete_char_forward();
                     }
@@ -533,6 +593,67 @@ impl KeymapHandler for EmacsKeymap {
                                         editor.move_word_forward();
                                     }
                                 }
+                                editor.needs_render = true;
+                            }
+                            KeyCode::Char('<') => {
+                                editor.engine.state.cursor = Position { line: 1, col: 0 };
+                                editor.needs_render = true;
+                            }
+                            KeyCode::Char('>') => {
+                                let last = editor.engine.buffer.content_line_count().max(1);
+                                let col = editor.engine.buffer.line_content_len(last);
+                                editor.engine.state.cursor = Position { line: last, col };
+                                editor.needs_render = true;
+                            }
+                            KeyCode::Char('m') => {
+                                let line = editor.engine.state.cursor.line;
+                                editor.engine.state.cursor.col = editor.first_non_blank_col(line);
+                                editor.needs_render = true;
+                            }
+                            KeyCode::Char('u') => {
+                                for _ in 0..count {
+                                    editor.upcase_word();
+                                }
+                            }
+                            KeyCode::Char('l') => {
+                                for _ in 0..count {
+                                    editor.downcase_word();
+                                }
+                            }
+                            KeyCode::Char('c') => {
+                                for _ in 0..count {
+                                    editor.capitalize_word();
+                                }
+                            }
+                            KeyCode::Char('d') => {
+                                for _ in 0..count {
+                                    editor.kill_word();
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                for _ in 0..count {
+                                    editor.kill_word_backward();
+                                }
+                            }
+                            KeyCode::Delete => {
+                                for _ in 0..count {
+                                    editor.kill_word();
+                                }
+                            }
+                            KeyCode::Char('n') => {
+                                for _ in 0..count {
+                                    editor.search_next();
+                                }
+                                editor.needs_render = true;
+                            }
+                            KeyCode::Char('p') => {
+                                for _ in 0..count {
+                                    editor.search_prev();
+                                }
+                                editor.needs_render = true;
+                            }
+                            KeyCode::Char('g') => {
+                                editor.engine.operator_state.emacs_prefix = Some('g');
                                 editor.needs_render = true;
                             }
                             KeyCode::Char('b') => {

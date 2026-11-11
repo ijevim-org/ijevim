@@ -33,7 +33,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deletion, kills, yanks, self-insert, paging and transpose.
 - Emacs: `CursorState::yank_text` and `UndoManager::push_insert_coalescing` in
   `ijevim-core` (consecutive self-inserts form one undo unit).
-- Tests: `tests/emacs_flow.rs` (34 regression tests) and the opt-in differential
+- Emacs navigation: `M-<` / `M->` buffer edges, `M-m` back-to-indentation,
+  `M-g g` goto-line (new `goto <n>` command).
+- Emacs case commands: `M-u` upcase-word, `M-l` downcase-word, `M-c`
+  capitalize-word, and `C-x C-u` / `C-x C-l` upcase/downcase-region.
+- Emacs word kills: `M-d` kill-word and `M-DEL` / `M-Delete` backward-kill-word,
+  including kill-ring append and undo.
+- Emacs: `M-n` / `M-p` repeat the current search forward/backward (numeric
+  arguments supported).
+- Emacs dired: `Enter` visits the entry, `g` reverts the listing, `^` goes to
+  the parent directory, and `q` buries the listing.
+- Tests: `tests/emacs_flow.rs` (44 regression tests) and the opt-in differential
   harness `tests/emacs_probe.rs` + `scripts/emacs-diff.sh` against `emacs -Q`.
 
 ### Changed
@@ -47,6 +57,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `TextBuffer::is_dirty()`. All emacs operations funnel through it.
 - `set_buffer_for_test` now seeds the buffer via `TextBuffer::with_text` instead
   of one character at a time.
+- Emacs `M-d` now kills from point to the end of the current/next word across
+  line boundaries via `Editor::forward_word_bounds`, instead of stopping at the
+  end of the line. `M-DEL` joins the previous line when point is at column 0.
 - Command-mode prompts (search, `:`, `M-x`) are now routed centrally in
   `Editor::handle_key` instead of inside each keymap, so they behave the same in
   Vim and Emacs modes.

@@ -109,6 +109,23 @@ impl Editor {
                         }
                         self.needs_render = true;
                     }
+                    cmd if cmd.starts_with("goto ") => {
+                        let arg = cmd.trim_start_matches("goto ").trim();
+                        match arg.parse::<usize>() {
+                            Ok(n) => {
+                                let last = self.engine.buffer.content_line_count().max(1);
+                                self.engine.state.cursor = crate::types::Position {
+                                    line: n.clamp(1, last),
+                                    col: 0,
+                                };
+                                self.needs_render = true;
+                            }
+                            Err(_) => self.engine.state.push_message(
+                                MessageLevel::Warning,
+                                format!("Invalid line number: {}", arg),
+                            ),
+                        }
+                    }
                     "messages" => {
                         if self.engine.state.message_history.is_empty() {
                             self.engine

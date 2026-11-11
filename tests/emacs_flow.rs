@@ -548,3 +548,165 @@ async fn c_x_ctrl_w_saves_to_the_typed_path() {
     );
     assert_eq!(e.engine.state.file_path.as_deref(), Some(path.as_path()));
 }
+
+// ── Navigation and case commands ───────────────────────────────────
+
+#[tokio::test]
+async fn meta_angle_moves_to_buffer_edges() {
+    let mut e = ed("one\ntwo\nthree\n");
+    alt(&mut e, '>').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 3, col: 5 });
+
+    alt(&mut e, '<').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 0 });
+}
+
+#[tokio::test]
+async fn meta_m_moves_to_first_non_blank() {
+    let mut e = ed("    indented\n");
+    e.engine.state.cursor = Position { line: 1, col: 10 };
+    alt(&mut e, 'm').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 4 });
+}
+
+#[tokio::test]
+async fn meta_g_g_prompts_and_gotos_a_line() {
+    let mut e = ed("one\ntwo\nthree\n");
+    alt(&mut e, 'g').await;
+    press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE).await;
+    assert_eq!(e.engine.state.mode, Mode::Command);
+    assert_eq!(e.engine.state.command_buffer, "goto ");
+
+    press(&mut e, KeyCode::Char('3'), KeyModifiers::NONE).await;
+    press(&mut e, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(e.engine.state.cursor, Position { line: 3, col: 0 });
+}
+
+#[tokio::test]
+async fn meta_case_commands_transform_words_and_undo() {
+    let mut e = ed("hello world\n");
+    alt(&mut e, 'u').await;
+    assert_eq!(e.engine.buffer.to_string(), "HELLO world\n");
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 5 });
+
+    ctrl(&mut e, '/').await;
+    assert_eq!(e.engine.buffer.to_string(), "hello world\n");
+
+    let mut e = ed("HELLO WORLD\n");
+    alt(&mut e, 'l').await;
+    assert_eq!(e.engine.buffer.to_string(), "hello WORLD\n");
+
+    let mut e = ed("hello world\n");
+    alt(&mut e, 'c').await;
+    assert_eq!(e.engine.buffer.to_string(), "Hello world\n");
+}
+
+#[tokio::test]
+async fn c_x_c_u_and_c_x_c_l_transform_the_region() {
+    let mut e = ed("abc def\n");
+    ctrl(&mut e, ' ').await;
+    for _ in 0..3 {
+        ctrl(&mut e, 'f').await;
+    }
+    ctrl(&mut e, 'x').await;
+    ctrl(&mut e, 'u').await;
+    assert_eq!(e.engine.buffer.to_string(), "ABC def\n");
+
+    ctrl(&mut e, '/').await;
+    assert_eq!(e.engine.buffer.to_string(), "abc def\n");
+
+    ctrl(&mut e, 'x').await;
+    ctrl(&mut e, 'l').await;
+    assert_eq!(e.engine.buffer.to_string(), "abc def\n");
+}
+
+#[tokio::test]
+async fn meta_d_and_meta_backspace_kill_words() {
+    let mut e = ed("foo bar\n");
+    alt(&mut e, 'd').await;
+    assert_eq!(e.engine.buffer.to_string(), " bar\n");
+    ctrl(&mut e, '/').await;
+    assert_eq!(e.engine.buffer.to_string(), "foo bar\n");
+
+    e.engine.state.cursor = Position { line: 1, col: 3 };
+    press(&mut e, KeyCode::Backspace, KeyModifiers::ALT).await;
+    assert_eq!(e.engine.buffer.to_string(), " bar\n");
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 0 });
+}
+
+#[tokio::test]
+async fn meta_n_and_meta_p_repeat_the_last_search() {
+    let mut e = ed("one two one\n");
+    ctrl(&mut e, 's').await;
+    for c in "one".chars() {
+        press(&mut e, KeyCode::Char(c), KeyModifiers::NONE).await;
+    }
+    press(&mut e, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 8 });
+
+    alt(&mut e, 'n').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 0 });
+
+    alt(&mut e, 'p').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 8 });
+    assert_eq!(e.engine.buffer.to_string(), "one two one\n");
+}
+
+// ── Dired ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn dired_enter_opens_the_selected_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, "alpha\n").expect("write file");
+
+    let mut e = ed("scratch\n");
+    e.engine
+        .buffer_open_dir(dir.path().to_str().unwrap())
+        .expect("open dir");
+    assert!(e.engine.buffer.is_directory_listing());
+
+    press(&mut e, KeyCode::Enter, KeyModifiers::NONE).await;
+    assert_eq!(e.engine.buffer.to_string(), "alpha\n");
+    assert_eq!(e.engine.state.file_path.as_deref(), Some(file.as_path()));
+}
+
+#[tokio::test]
+async fn dired_g_reverts_and_caret_goes_up() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.txt"), "a\n").expect("write file");
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).expect("mkdir");
+
+    let mut e = ed("scratch\n");
+    e.engine
+        .buffer_open_dir(sub.to_str().unwrap())
+        .expect("open subdir");
+
+    press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE).await;
+    assert!(e.engine.buffer.is_directory_listing());
+    assert_eq!(
+        e.engine.buffer.dir_path().map(|p| p.to_path_buf()),
+        Some(sub.clone())
+    );
+
+    press(&mut e, KeyCode::Char('^'), KeyModifiers::NONE).await;
+    assert_eq!(
+        e.engine.buffer.dir_path().map(|p| p.to_path_buf()),
+        Some(dir.path().to_path_buf())
+    );
+}
+
+#[tokio::test]
+async fn dired_q_closes_the_listing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.txt"), "a\n").expect("write file");
+
+    let mut e = ed("scratch\n");
+    e.engine
+        .buffer_open_dir(dir.path().to_str().unwrap())
+        .expect("open dir");
+
+    press(&mut e, KeyCode::Char('q'), KeyModifiers::NONE).await;
+    assert!(!e.engine.buffer.is_directory_listing());
+}
