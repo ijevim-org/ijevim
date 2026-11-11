@@ -55,21 +55,21 @@ Direct dependencies only. Transitive crate counts include the workspace crates.
 
 | Scope | crates in graph |
 | --- | --- |
-| Default build | 56 |
-| `--all-features` | 88 |
-| Default + dev-dependencies | 94 |
+| Default build | 57 |
+| `--all-features` | 89 |
+| Default + dev-dependencies | 95 |
 
 ### Runtime
 
 | Crate | Version | Used by | License |
 | --- | --- | --- | --- |
 | [crossterm](https://crates.io/crates/crossterm) | 0.29.0 | `ijevim`, `ijevim-tui` | MIT |
-| [regex](https://crates.io/crates/regex) | 1.12.3 | `ijevim`, `ijevim-core` | MIT OR Apache-2.0 |
+| [regex](https://crates.io/crates/regex) | 1.13.1 | `ijevim`, `ijevim-core` | MIT OR Apache-2.0 |
 | [ropey](https://crates.io/crates/ropey) | 1.6.1 | `ijevim-core` | MIT |
-| [thiserror](https://crates.io/crates/thiserror) | 2.0.18 | `ijevim-core` | MIT OR Apache-2.0 |
+| [thiserror](https://crates.io/crates/thiserror) | 2.0.21 | `ijevim-core` | MIT OR Apache-2.0 |
 | [tokio](https://crates.io/crates/tokio) | 1.53.3 | `ijevim`, `ijevim-core` | MIT |
 | [toml](https://crates.io/crates/toml) | 0.8.23 | `ijevim-core` | MIT OR Apache-2.0 |
-| [unicode-width](https://crates.io/crates/unicode-width) | 0.2.2 | `ijevim-tui` | MIT OR Apache-2.0 |
+| [unicode-width](https://crates.io/crates/unicode-width) | 0.2.3 | `ijevim-tui` | MIT OR Apache-2.0 |
 
 ### Optional
 
@@ -81,7 +81,7 @@ Only compiled when the matching cargo feature is enabled.
 | [mlua](https://crates.io/crates/mlua) | 0.9.9 | `ijevim-plugin` | MIT |
 | [quickjs-rusty](https://crates.io/crates/quickjs-rusty) | 0.11.1 | `ijevim-plugin` | MIT |
 | [rust_lisp](https://crates.io/crates/rust_lisp) | 0.18.0 | `ijevim-plugin` | MIT |
-| [serde_json](https://crates.io/crates/serde_json) | 1.0.150 | `ijevim-plugin` | MIT OR Apache-2.0 |
+| [serde_json](https://crates.io/crates/serde_json) | 1.0.154 | `ijevim-plugin` | MIT OR Apache-2.0 |
 | [syntect](https://crates.io/crates/syntect) | 5.3.0 | `ijevim-highlight` | MIT |
 
 ### Development

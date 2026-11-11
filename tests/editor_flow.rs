@@ -659,32 +659,34 @@ async fn emacs_ctrl_g_aborts_command_mode() {
     );
 }
 
-// ── Emacs C-x u redo ───────────────────────────────────────
+// ── Emacs C-x u undo ───────────────────────────────────────
 
 #[tokio::test]
-async fn emacs_ctrl_x_u_redo() {
+async fn emacs_ctrl_x_u_undo() {
     let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless");
     ed.set_buffer_for_test("hello world\n");
-    // Make a change, undo it, then C-x u redo
     ed.engine.state.cursor.col = 5;
     ed.handle_key_for_test(KeyCode::Char('d'), KeyModifiers::CONTROL)
         .await;
     let (buf, _, _, _) = ed.snapshot_for_test();
     assert_eq!(buf, "helloworld\n", "C-d deleted space");
 
-    // Undo
-    ed.handle_key_for_test(KeyCode::Char('/'), KeyModifiers::CONTROL)
-        .await;
-    let (buf, _, _, _) = ed.snapshot_for_test();
-    assert_eq!(buf, "hello world\n", "C-/ undid deletion");
-
-    // C-x u redo
+    // C-x u is undo in Emacs.
     ed.handle_key_for_test(KeyCode::Char('x'), KeyModifiers::CONTROL)
         .await;
     ed.handle_key_for_test(KeyCode::Char('u'), KeyModifiers::NONE)
         .await;
     let (buf, _, _, _) = ed.snapshot_for_test();
-    assert_eq!(buf, "helloworld\n", "C-x u redid deletion");
+    assert_eq!(buf, "hello world\n", "C-x u undid deletion");
+
+    // Redo stays reachable through the documented extension C-M-/.
+    ed.handle_key_for_test(
+        KeyCode::Char('/'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    )
+    .await;
+    let (buf, _, _, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "helloworld\n", "C-M-/ redid deletion");
 }
 
 // ── Emacs C-x C-s save file ────────────────────────────────
@@ -749,27 +751,37 @@ async fn emacs_ctrl_x_ctrl_c_quits() {
     assert!(!ed.running, "editor quit after 'y'");
 }
 
-// ── Emacs C-x h / C-x d line start/end ──────────────────────
+// ── Emacs C-x h / C-x d ────────────────────────────────────
 
 #[tokio::test]
-async fn emacs_ctrl_x_h_moves_to_line_start() {
+async fn emacs_ctrl_x_h_marks_whole_buffer() {
     let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless");
     ed.set_buffer_for_test("hello world\n");
-    ed.engine.state.cursor.col = 5; // Middle of "hello"
+    ed.engine.state.cursor = ijevim::types::Position { line: 1, col: 5 };
 
     ed.handle_key_for_test(KeyCode::Char('x'), KeyModifiers::CONTROL)
         .await;
-    ed.handle_key_for_test(KeyCode::Char('h'), KeyModifiers::CONTROL)
+    ed.handle_key_for_test(KeyCode::Char('h'), KeyModifiers::NONE)
         .await;
 
-    assert_eq!(ed.engine.state.cursor.col, 0, "C-x h moved to line start");
+    assert_eq!(
+        ed.engine.state.mark,
+        Some(ijevim::types::Position { line: 1, col: 0 }),
+        "C-x h puts the mark at the start of the buffer"
+    );
+    assert_eq!(
+        ed.engine.state.cursor,
+        ijevim::types::Position { line: 1, col: 11 },
+        "C-x h puts point at the end of the buffer"
+    );
+    assert!(ed.engine.state.region_active, "C-x h activates the region");
 }
 
 #[tokio::test]
-async fn emacs_ctrl_x_d_moves_to_line_end() {
+async fn emacs_ctrl_x_d_is_undefined() {
     let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless");
     ed.set_buffer_for_test("hello world\n");
-    ed.engine.state.cursor.col = 2; // Near start
+    ed.engine.state.cursor.col = 2;
 
     ed.handle_key_for_test(KeyCode::Char('x'), KeyModifiers::CONTROL)
         .await;
@@ -777,15 +789,23 @@ async fn emacs_ctrl_x_d_moves_to_line_end() {
         .await;
 
     assert_eq!(
-        ed.engine.state.cursor.col, 11,
-        "C-x d moved to line end (before newline)"
+        ed.engine.state.cursor.col, 2,
+        "C-x d must not move point (dired is not implemented)"
+    );
+    assert!(
+        ed.engine
+            .state
+            .last_message
+            .as_deref()
+            .is_some_and(|m| m.contains("undefined")),
+        "C-x d reports an undefined sequence"
     );
 }
 
-// ── Emacs C-x C-/ redo ──────────────────────────────────────
+// ── Emacs C-x C-/ undo ──────────────────────────────────────
 
 #[tokio::test]
-async fn emacs_ctrl_x_ctrl_slash_redo() {
+async fn emacs_ctrl_x_ctrl_slash_undo() {
     let mut ed = Editor::new_headless_for_test(Keymap::Emacs).expect("headless");
     ed.set_buffer_for_test("hello world\n");
     ed.engine.state.cursor.col = 5;
@@ -796,19 +816,13 @@ async fn emacs_ctrl_x_ctrl_slash_redo() {
     let (buf, _, _, _) = ed.snapshot_for_test();
     assert_eq!(buf, "helloworld\n", "C-d deleted space");
 
-    // Undo with C-/
-    ed.handle_key_for_test(KeyCode::Char('/'), KeyModifiers::CONTROL)
-        .await;
-    let (buf, _, _, _) = ed.snapshot_for_test();
-    assert_eq!(buf, "hello world\n", "C-/ undid deletion");
-
-    // C-x C-/ redo
+    // C-x C-/ is also undo in Emacs.
     ed.handle_key_for_test(KeyCode::Char('x'), KeyModifiers::CONTROL)
         .await;
     ed.handle_key_for_test(KeyCode::Char('/'), KeyModifiers::CONTROL)
         .await;
     let (buf, _, _, _) = ed.snapshot_for_test();
-    assert_eq!(buf, "helloworld\n", "C-x C-/ redid deletion");
+    assert_eq!(buf, "hello world\n", "C-x C-/ undid deletion");
 }
 
 // ── Emacs C-y yank from kill ring ──────────────────────────
@@ -821,7 +835,7 @@ async fn emacs_ctrl_y_yanks_from_kill_ring() {
     ed.handle_key_for_test(KeyCode::Char('k'), KeyModifiers::CONTROL)
         .await;
     let (buf, _, _, _) = ed.snapshot_for_test();
-    assert_eq!(buf, "\n", "C-k killed line content");
+    assert_eq!(buf, "", "C-k at bol killed the whole line");
 
     // Yank back at start
     ed.engine.state.cursor.col = 0;

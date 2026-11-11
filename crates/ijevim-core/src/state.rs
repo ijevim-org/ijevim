@@ -10,6 +10,11 @@ pub struct CursorState {
     pub yank_start: Option<Position>,
     /// Length of text inserted by the last yank (for yank-pop undo).
     pub yank_length: usize,
+    /// Text inserted by the last yank.
+    ///
+    /// Kept so `yank-pop` can record an exact undo entry without re-reading
+    /// the buffer (and without losing multi-line content).
+    pub yank_text: String,
 }
 
 /// Tracks pending Vim operator state machine.
@@ -36,8 +41,26 @@ pub struct OperatorState {
     pub replace_char: Option<char>,
     /// Ctrl-w prefix: waiting for second key (w, j, k, h, l, c, =, _, |, etc.)
     pub ctrl_w_prefix: bool,
-    /// Emacs C-x prefix: waiting for second key (s, c, h, d, u, /, etc.)
-    pub emacs_cx_prefix: bool,
+    /// Emacs prefix key that is awaiting its second key.
+    ///
+    /// `Some('x')` means `C-x` was pressed. Keeping the prefix as data (rather
+    /// than a boolean) lets the Emacs keymap consume undefined sequences
+    /// instead of leaking the second key into the normal bindings.
+    pub emacs_prefix: Option<char>,
+    /// True when the previous Emacs command was a kill.
+    ///
+    /// Consecutive kills append to the same kill-ring entry; any other command
+    /// clears this flag. Vim's `dd`/`yy` path does not use it.
+    pub last_command_was_kill: bool,
+    /// Emacs numeric argument (`C-u`, `M-3`, ...) awaiting its command.
+    ///
+    /// `None` means no argument is active. Negative values make directional
+    /// commands run backwards.
+    pub emacs_numeric_arg: Option<i32>,
+    /// Whether any digit has been typed into the current numeric argument.
+    ///
+    /// `C-u 3` means 3, not 43: the first digit replaces the implicit 4.
+    pub emacs_numeric_arg_digits: bool,
 }
 
 impl OperatorState {
@@ -50,7 +73,10 @@ impl OperatorState {
         self.macro_play = None;
         self.replace_char = None;
         self.ctrl_w_prefix = false;
-        self.emacs_cx_prefix = false;
+        self.emacs_prefix = None;
+        self.last_command_was_kill = false;
+        self.emacs_numeric_arg = None;
+        self.emacs_numeric_arg_digits = false;
     }
 
     /// Take the accumulated count, defaulting to 1 if absent.

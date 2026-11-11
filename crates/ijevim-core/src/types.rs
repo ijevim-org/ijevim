@@ -178,6 +178,34 @@ impl WindowLayout {
         }
     }
 
+    /// Close every window except the focused one, which is expanded to the
+    /// full area currently covered by the layout.
+    pub fn close_other_windows(&mut self) {
+        if self.windows.len() <= 1 {
+            return;
+        }
+        let max_row = self.windows.iter().map(|w| w.row_end).max().unwrap_or(0);
+        let max_col = self.windows.iter().map(|w| w.col_end).max().unwrap_or(0);
+        let mut kept = self.windows[self.focused].clone();
+        kept.row_start = 0;
+        kept.col_start = 0;
+        kept.row_end = max_row;
+        kept.col_end = max_col;
+        self.windows = vec![kept];
+        self.focused = 0;
+    }
+
+    /// Focus the previous window (wrap around).
+    pub fn focus_prev(&mut self) {
+        if !self.windows.is_empty() {
+            self.focused = if self.focused == 0 {
+                self.windows.len() - 1
+            } else {
+                self.focused - 1
+            };
+        }
+    }
+
     /// Focus the next window (wrap around).
     pub fn focus_next(&mut self) {
         if !self.windows.is_empty() {
@@ -711,6 +739,22 @@ impl KillRing {
             self.entries.pop();
         }
         self.entries.insert(0, text.to_string());
+        self.index = 0;
+    }
+
+    /// Append to the most recent entry instead of creating a new one.
+    ///
+    /// Emacs treats consecutive kill commands (`C-k`, `C-w`, ...) as one
+    /// logical kill, so the second one must extend the first entry rather than
+    /// push a separate one.
+    pub fn push_append(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match self.entries.first_mut() {
+            Some(entry) => entry.push_str(text),
+            None => self.push(text),
+        }
         self.index = 0;
     }
 

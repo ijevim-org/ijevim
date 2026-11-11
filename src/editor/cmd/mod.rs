@@ -2,6 +2,12 @@ use crate::editor::Editor;
 use crate::types::{ConfirmAction, MessageLevel, Mode, SearchDirection};
 use crossterm::event::{KeyCode, KeyModifiers};
 
+mod ex;
+mod files;
+mod git;
+mod set;
+mod substitute;
+
 impl Editor {
     pub(crate) async fn handle_command(&mut self, key: KeyCode, modifiers: KeyModifiers) {
         if !matches!(key, KeyCode::Tab) {
@@ -49,6 +55,13 @@ impl Editor {
                     cmd if cmd.starts_with("keymap ") => {
                         let keymap_name = cmd.trim_start_matches("keymap ").trim();
                         self.switch_keymap(keymap_name);
+                    }
+                    cmd if cmd == "b" || cmd.starts_with("b ") => {
+                        let name = cmd.strip_prefix('b').unwrap_or(cmd).trim();
+                        if let Err(e) = self.engine.buffer_switch_by_name(name) {
+                            self.engine.state.push_message(MessageLevel::Error, e);
+                        }
+                        self.needs_render = true;
                     }
                     "bn" | "bnext" => {
                         if let Err(e) = self.engine.buffer_next() {
@@ -101,6 +114,23 @@ impl Editor {
                             self.engine.state.push_message(MessageLevel::Error, e);
                         }
                         self.needs_render = true;
+                    }
+                    cmd if cmd.starts_with("goto ") => {
+                        let arg = cmd.trim_start_matches("goto ").trim();
+                        match arg.parse::<usize>() {
+                            Ok(n) => {
+                                let last = self.engine.buffer.content_line_count().max(1);
+                                self.engine.state.cursor = crate::types::Position {
+                                    line: n.clamp(1, last),
+                                    col: 0,
+                                };
+                                self.needs_render = true;
+                            }
+                            Err(_) => self.engine.state.push_message(
+                                MessageLevel::Warning,
+                                format!("Invalid line number: {}", arg),
+                            ),
+                        }
                     }
                     "messages" => {
                         if self.engine.state.message_history.is_empty() {
@@ -223,7 +253,7 @@ impl Editor {
                     self.needs_render = true;
                 }
             }
-            KeyCode::Esc | KeyCode::Char('c')
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('g')
                 if key == KeyCode::Esc || modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cancel_search_preview();
@@ -480,577 +510,5 @@ impl Editor {
                 }
             }
         }
-    }
-
-    fn handle_set_command(&mut self, cmd: &str) {
-        let args = cmd.trim_start_matches("set ").trim();
-
-        match args {
-            "number" => {
-                self.engine.state.show_line_numbers = true;
-            }
-            "nonumber" | "nonumber!" => {
-                self.engine.state.show_line_numbers = false;
-            }
-            "number!" => {
-                self.engine.state.show_line_numbers = !self.engine.state.show_line_numbers;
-            }
-            "relativenumber" => {
-                self.engine.state.show_relative_numbers = true;
-            }
-            "norelativenumber" | "norelativenumber!" => {
-                self.engine.state.show_relative_numbers = false;
-            }
-            "relativenumber!" => {
-                self.engine.state.show_relative_numbers = !self.engine.state.show_relative_numbers;
-            }
-            "hlsearch" => {
-                self.engine.state.hlsearch = true;
-            }
-            "nohlsearch" | "nohlsearch!" => {
-                self.engine.state.hlsearch = false;
-            }
-            "hlsearch!" => {
-                self.engine.state.hlsearch = !self.engine.state.hlsearch;
-            }
-            "expandtab" | "et" => {
-                self.engine.state.expandtab = true;
-            }
-            "noexpandtab" | "noet" => {
-                self.engine.state.expandtab = false;
-            }
-            "expandtab!" | "et!" => {
-                self.engine.state.expandtab = !self.engine.state.expandtab;
-            }
-            args if args.starts_with("tabstop=") || args.starts_with("ts=") => {
-                let val = args.split_once('=').map(|x| x.1).unwrap_or("8");
-                if let Ok(n) = val.parse::<usize>() {
-                    self.engine.state.tabstop = n;
-                } else {
-                    self.engine
-                        .state
-                        .push_message(MessageLevel::Warning, format!("Invalid value: {}", val));
-                }
-            }
-            args if args.starts_with("shiftwidth=") || args.starts_with("sw=") => {
-                let val = args.split_once('=').map(|x| x.1).unwrap_or("4");
-                if let Ok(n) = val.parse::<usize>() {
-                    self.engine.state.shiftwidth = n;
-                } else {
-                    self.engine
-                        .state
-                        .push_message(MessageLevel::Warning, format!("Invalid value: {}", val));
-                }
-            }
-            args if args.starts_with("scrolloff=") || args.starts_with("so=") => {
-                let val = args.split_once('=').map(|x| x.1).unwrap_or("0");
-                if let Ok(n) = val.parse::<usize>() {
-                    self.engine.state.scrolloff = n;
-                } else {
-                    self.engine
-                        .state
-                        .push_message(MessageLevel::Warning, format!("Invalid value: {}", val));
-                }
-            }
-            _ => {
-                self.engine.state.push_message(
-                    MessageLevel::Warning,
-                    format!("Unknown set option: {}", args),
-                );
-            }
-        }
-    }
-
-    /// True for `:s/...`, `:%s/...`, `:3s/...`, `:1,5s/...` and `:$s/...`.
-    fn is_substitute_command(cmd: &str) -> bool {
-        let Some(idx) = cmd.find("s/") else {
-            return false;
-        };
-        let spec = &cmd[..idx];
-        match spec.chars().next() {
-            // No range at all: `:s/...`.
-            None => true,
-            // A range-looking prefix is routed here so a malformed one is
-            // reported as an invalid range rather than an unknown command.
-            Some(c) => c.is_ascii_digit() || c == '%' || c == '.' || c == '$',
-        }
-    }
-
-    /// Handle `:[range]s/pattern/replacement/[g]`.
-    ///
-    /// The replacement follows Vim's syntax (`&`, `\1`..`\9`) and is
-    /// translated to the `regex` crate's (`$0`, `$1`..`$9`).
-    fn handle_substitute(&mut self, cmd: &str) {
-        let Some(idx) = cmd.find("s/") else {
-            self.engine.state.push_message(
-                MessageLevel::Warning,
-                "Invalid substitute command".to_string(),
-            );
-            return;
-        };
-        let range_spec = &cmd[..idx];
-        let rest = &cmd[idx + 2..];
-
-        // Split into pattern / replacement / flags.
-        let mut parts = rest.splitn(3, '/');
-        let pattern_str = parts.next().unwrap_or("");
-        let Some(replacement) = parts.next() else {
-            self.engine.state.push_message(
-                MessageLevel::Warning,
-                "Invalid substitute syntax".to_string(),
-            );
-            return;
-        };
-        let flags = parts.next().unwrap_or("");
-
-        if pattern_str.is_empty() {
-            self.engine.state.push_message(
-                MessageLevel::Warning,
-                "Empty substitute pattern".to_string(),
-            );
-            return;
-        }
-
-        let re = match regex::Regex::new(pattern_str) {
-            Ok(re) => re,
-            Err(e) => {
-                self.engine
-                    .state
-                    .push_message(MessageLevel::Warning, format!("Regex error: {}", e));
-                return;
-            }
-        };
-        let replacement = translate_replacement(replacement);
-
-        let global = flags.contains('g');
-        let line_count = self.engine.buffer.line_count();
-
-        let Some((start_line, end_line)) =
-            parse_line_range(range_spec, self.engine.state.cursor.line, line_count)
-        else {
-            self.engine.state.push_message(
-                MessageLevel::Warning,
-                format!("Invalid range: {}", range_spec),
-            );
-            return;
-        };
-
-        let mut replacements = 0;
-        let mut edits: Vec<crate::undo::Edit> = Vec::new();
-
-        // Process lines bottom-up so earlier line indices stay valid, and treat
-        // the trailing newline as part of the line. Otherwise substituting N
-        // lines joins them all into one.
-        for line_idx in (start_line..=end_line).rev() {
-            let old_text = self.engine.buffer.get_line(line_idx);
-            let new_text = if global {
-                re.replace_all(&old_text, replacement.as_str()).to_string()
-            } else {
-                re.replace(&old_text, replacement.as_str()).to_string()
-            };
-            if new_text == old_text {
-                continue;
-            }
-            replacements += 1;
-            let mod_count = self.engine.buffer.modification_count();
-
-            let char_start = self.engine.buffer.line_to_char(line_idx - 1);
-            let char_end = char_start + old_text.chars().count();
-            self.engine.buffer.remove_range(char_start, char_end);
-            self.engine.buffer.insert(line_idx, 0, &new_text);
-
-            edits.push(crate::undo::Edit {
-                edit_type: crate::undo::EditType::Replace {
-                    line: line_idx,
-                    col: 0,
-                    old_text,
-                    new_text,
-                },
-                cursor_before: self.engine.state.cursor,
-                cursor_after: self.engine.state.cursor,
-                modification_count: mod_count,
-            });
-        }
-
-        // One `u` reverts the whole `:s`, like Vim. The group records the
-        // modification count from before the first substitution so undoing it
-        // restores the clean state.
-        if let Some(first) = edits.first() {
-            let modification_count = first.modification_count;
-            let cursor_before = first.cursor_before;
-            self.engine.undo_manager.push(crate::undo::Edit {
-                edit_type: crate::undo::EditType::Group { edits },
-                cursor_before,
-                cursor_after: self.engine.state.cursor,
-                modification_count,
-            });
-        }
-
-        self.engine.state.dirty = self.engine.buffer.is_dirty();
-        self.engine.state.push_message(
-            MessageLevel::Info,
-            format!(
-                "{} substitutions on {} line{}",
-                replacements,
-                if end_line > start_line {
-                    format!("{}", end_line - start_line + 1)
-                } else {
-                    "1".to_string()
-                },
-                if replacements == 1 { "" } else { "s" }
-            ),
-        );
-        self.needs_render = true;
-    }
-
-    async fn reload_file(&mut self) {
-        // Directory listings cannot be reloaded as text files — refresh instead.
-        if self.engine.buffer.is_directory_listing() {
-            self.refresh_directory();
-            return;
-        }
-        if let Some(path) = &self.engine.state.file_path {
-            match crate::buffer::TextBuffer::load_file(path.to_str().unwrap_or("")).await {
-                Ok(buf) => {
-                    self.engine.buffer = buf;
-                }
-                Err(e) => {
-                    self.engine
-                        .state
-                        .push_message(MessageLevel::Error, format!("Failed to reload file: {}", e));
-                }
-            }
-        }
-    }
-
-    async fn reload_file_discard(&mut self) {
-        if self.engine.buffer.is_dirty() {
-            self.engine.state.set_confirmation(
-                "No write since last change. Reload anyway? (y/n)".to_string(),
-                ConfirmAction::ReloadDiscard,
-            );
-            self.needs_render = true;
-        } else {
-            self.reload_file().await;
-        }
-    }
-
-    /// Save the current buffer and emit a BufferSave plugin event.
-    /// If the save fails, set an error message instead.
-    async fn save_and_emit(&mut self) {
-        match self.engine.buffer.save_file().await {
-            Ok(()) => {
-                self.engine.state.dirty = false;
-                self.engine
-                    .plugin_manager
-                    .emit(crate::types::PluginEvent::BufferSave {
-                        file_path: self.engine.state.file_path.clone(),
-                    });
-            }
-            Err(e) => {
-                self.engine
-                    .state
-                    .push_message(MessageLevel::Error, format!("Save failed: {}", e));
-            }
-        }
-    }
-
-    async fn handle_write_path(&mut self, cmd: &str) {
-        let path_str = cmd.trim_start_matches("w!").trim_start_matches("w ").trim();
-        if path_str.is_empty() {
-            self.engine
-                .state
-                .push_message(MessageLevel::Warning, "Expected filename after 'w'");
-            return;
-        }
-        let path = std::path::PathBuf::from(path_str);
-        match self.engine.buffer.save_to_path(&path).await {
-            Ok(_) => {
-                self.engine.state.file_path = Some(path);
-                self.engine.state.dirty = false;
-                self.engine
-                    .plugin_manager
-                    .emit(crate::types::PluginEvent::BufferSave {
-                        file_path: self.engine.state.file_path.clone(),
-                    });
-            }
-            Err(e) => {
-                self.engine
-                    .state
-                    .push_message(MessageLevel::Error, format!("Save failed: {}", e));
-            }
-        }
-    }
-
-    async fn handle_write_quit_path(&mut self, cmd: &str) {
-        let path_str = cmd
-            .trim_start_matches("wq!")
-            .trim_start_matches("wq ")
-            .trim();
-        if path_str.is_empty() {
-            self.engine
-                .state
-                .push_message(MessageLevel::Warning, "Expected filename after 'wq'");
-            return;
-        }
-        let path = std::path::PathBuf::from(path_str);
-        match self.engine.buffer.save_to_path(&path).await {
-            Ok(_) => {
-                self.engine.state.file_path = Some(path);
-                self.engine.state.dirty = false;
-                self.engine
-                    .plugin_manager
-                    .emit(crate::types::PluginEvent::BufferSave {
-                        file_path: self.engine.state.file_path.clone(),
-                    });
-                self.running = false;
-            }
-            Err(e) => {
-                self.engine
-                    .state
-                    .push_message(MessageLevel::Error, format!("Save failed: {}", e));
-            }
-        }
-    }
-
-    /// Run a git command and show its output in messages.
-    pub(crate) fn handle_git_command(&mut self, args: &[&str]) {
-        let cmd_str = args.join(" ");
-        match crate::git::run(args) {
-            Ok(stdout) => {
-                if stdout.is_empty() {
-                    self.engine
-                        .state
-                        .push_message(MessageLevel::Info, format!("git {}: OK", cmd_str));
-                } else {
-                    self.engine
-                        .state
-                        .push_message(MessageLevel::Info, format!("git {}\n{}", cmd_str, stdout));
-                    // For branch listing, also push a compact summary.
-                    if stdout.lines().count() > 1 && args == ["branch"] {
-                        let branches: Vec<&str> = stdout
-                            .lines()
-                            .map(|l| l.trim_start_matches("* ").trim())
-                            .collect();
-                        self.engine.state.push_message(
-                            MessageLevel::Info,
-                            format!("Branches: {}", branches.join(", ")),
-                        );
-                    }
-                }
-            }
-            Err(stderr) => {
-                self.engine.state.push_message(
-                    MessageLevel::Error,
-                    format!("git {} failed: {}", cmd_str, stderr),
-                );
-            }
-        }
-    }
-
-    /// Reload the current file after a `git checkout` — file contents may have
-    /// changed (or the file may no longer exist).
-    fn reload_file_after_checkout(&mut self) {
-        self.needs_render = true;
-        let Some(path) = &self.engine.state.file_path.clone() else {
-            return;
-        };
-        let path_str = path.to_string_lossy().to_string();
-        if path.exists() {
-            match std::fs::read_to_string(&path_str) {
-                Ok(content) => {
-                    self.engine.buffer = crate::buffer::TextBuffer::with_text(&content);
-                    self.engine.state.file_path = Some(path.clone());
-                    self.engine.state.dirty = false;
-                    self.engine.state.push_message(
-                        MessageLevel::Info,
-                        format!("Reloaded after checkout: {}", path_str),
-                    );
-                }
-                Err(e) => {
-                    self.engine.state.push_message(
-                        MessageLevel::Warning,
-                        format!("Could not reload {}: {}", path_str, e),
-                    );
-                }
-            }
-        } else {
-            self.engine.buffer = crate::buffer::TextBuffer::new();
-            self.engine.state.file_path = None;
-            self.engine.state.push_message(
-                MessageLevel::Warning,
-                format!("File not found in this branch: {}", path_str),
-            );
-        }
-    }
-}
-
-/// Commands that accept a leading Ex range in this editor.
-fn is_range_command(rest: &str) -> bool {
-    matches!(rest, "d" | "y" | ">" | "<") || rest.starts_with("s/")
-}
-
-impl Editor {
-    /// Split a leading Ex range off `cmd`.
-    ///
-    /// Supports `'<,'>`, `%`, `N`, `N,M`, `.`, `$` and combinations. Returns
-    /// the resolved inclusive line range and the command that follows it.
-    fn split_ex_range<'a>(&self, cmd: &'a str) -> Option<((usize, usize), &'a str)> {
-        let line_count = self.engine.buffer.content_line_count().max(1);
-        if let Some(rest) = cmd.strip_prefix("'<,'>") {
-            let start = self
-                .engine
-                .state
-                .last_visual_start
-                .map(|p| p.line)
-                .unwrap_or(self.engine.state.cursor.line)
-                .clamp(1, line_count);
-            let end = self
-                .engine
-                .state
-                .last_visual_end
-                .or(self.engine.state.last_visual_start)
-                .map(|p| p.line)
-                .unwrap_or(self.engine.state.cursor.line)
-                .clamp(1, line_count);
-            let rest = rest.trim_start();
-            return is_range_command(rest).then_some(((start.min(end), start.max(end)), rest));
-        }
-
-        // The command starts at the first letter or `>`/`<`; everything
-        // before it must look like a range.
-        let idx = cmd
-            .char_indices()
-            .find(|(_, c)| c.is_ascii_alphabetic() || matches!(c, '>' | '<'))?
-            .0;
-        if idx == 0 {
-            return None;
-        }
-        let spec = cmd[..idx].trim();
-        if spec.is_empty() {
-            return None;
-        }
-        let rest = cmd[idx..].trim_start();
-        if !is_range_command(rest) {
-            return None;
-        }
-        let range = parse_line_range(spec, self.engine.state.cursor.line, line_count)?;
-        Some((range, rest))
-    }
-
-    /// Run a range command (`d`, `y`, `>`, `<`, `s/...`).
-    fn handle_ex_range(&mut self, range: (usize, usize), rest: &str) {
-        let (start, end) = range;
-        match rest {
-            "d" => {
-                if start <= end {
-                    self.delete_lines_range('"', start, end);
-                }
-            }
-            "y" => {
-                if start <= end {
-                    self.yank_lines_range('"', start, end);
-                }
-            }
-            ">" => self.indent_lines(start, end, true),
-            "<" => self.indent_lines(start, end, false),
-            _ if rest.starts_with("s/") => {
-                self.handle_substitute(&format!("{start},{end}{rest}"));
-            }
-            _ => {
-                self.engine
-                    .state
-                    .push_message(MessageLevel::Warning, format!("Unknown command: {}", rest));
-            }
-        }
-        self.needs_render = true;
-    }
-}
-
-/// Parse a `:s` range: `%`, ``, `3`, `1,5`, `.,$`, `$`.
-///
-/// Returns `(start, end)` clamped to the buffer, or `None` when the text is
-/// not a range (so the caller can report it instead of guessing).
-fn parse_line_range(spec: &str, current: usize, line_count: usize) -> Option<(usize, usize)> {
-    if spec == "%" {
-        return Some((1, line_count.max(1)));
-    }
-    match spec.split_once(',') {
-        Some((a, b)) => {
-            let start = parse_line_bound(a, current, line_count)?;
-            let end = parse_line_bound(b, current, line_count)?;
-            Some((start.min(end), start.max(end)))
-        }
-        None => {
-            let n = parse_line_bound(spec, current, line_count)?;
-            Some((n, n))
-        }
-    }
-}
-
-fn parse_line_bound(token: &str, current: usize, line_count: usize) -> Option<usize> {
-    let token = token.trim();
-    match token {
-        "" | "." => Some(current),
-        "$" => Some(line_count.max(1)),
-        _ => token
-            .parse::<usize>()
-            .ok()
-            .map(|n| n.clamp(1, line_count.max(1))),
-    }
-}
-
-/// Translate Vim replacement syntax into the `regex` crate's.
-///
-/// Vim: `&` = whole match, `\1`..`\9` = capture groups, `\&` = literal `&`.
-/// regex: `$0` = whole match, `$1`..`$9` = capture groups, `$$` = literal `$`.
-fn translate_replacement(replacement: &str) -> String {
-    let mut out = String::new();
-    let mut chars = replacement.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => match chars.next() {
-                Some(d @ '1'..='9') => {
-                    out.push('$');
-                    out.push(d);
-                }
-                Some('&') => out.push('&'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            },
-            '&' => out.push_str("$0"),
-            '$' => out.push_str("$$"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod substitute_tests {
-    use super::*;
-
-    #[test]
-    fn ranges_parse() {
-        assert_eq!(parse_line_range("%", 3, 10), Some((1, 10)));
-        assert_eq!(parse_line_range("", 3, 10), Some((3, 3)));
-        assert_eq!(parse_line_range("3", 7, 10), Some((3, 3)));
-        assert_eq!(parse_line_range("1,5", 7, 10), Some((1, 5)));
-        assert_eq!(parse_line_range(".,$", 4, 10), Some((4, 10)));
-        assert_eq!(parse_line_range("5,2", 1, 10), Some((2, 5)));
-        assert_eq!(parse_line_range("99", 1, 10), Some((10, 10)), "clamped");
-        assert_eq!(parse_line_range("x", 1, 10), None);
-        assert_eq!(parse_line_range("1,x", 1, 10), None);
-    }
-
-    #[test]
-    fn replacement_translates_vim_syntax() {
-        assert_eq!(translate_replacement("<&>"), "<$0>");
-        assert_eq!(translate_replacement(r"\1-\2"), "$1-$2");
-        assert_eq!(translate_replacement(r"\&"), "&");
-        assert_eq!(translate_replacement("cost: $5"), "cost: $$5");
     }
 }
