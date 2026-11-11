@@ -393,6 +393,34 @@ impl Editor {
         let col = self.engine.state.cursor.col;
         let end_col = self.engine.buffer.line_content_len(line);
 
+        if col == 0 && (end_col > 0 || line < self.engine.buffer.line_count()) {
+            // Emacs `C-k` at the beginning of a line kills the whole line,
+            // including its newline (unlike Vim's `dd`-free partial kill).
+            let mut deleted = self.engine.buffer.get_line(line);
+            while deleted.ends_with('\n') || deleted.ends_with('\r') {
+                deleted.pop();
+            }
+            let mod_count = self.engine.buffer.modification_count();
+            self.engine.buffer.delete_range(line, 0, line, end_col);
+            if line < self.engine.buffer.line_count() {
+                self.engine.buffer.merge_with_prev_line(line + 1);
+                deleted.push('\n');
+            }
+            self.kill_to_ring(&deleted);
+            self.engine.undo_manager.push(Edit {
+                edit_type: EditType::Delete {
+                    line,
+                    col: 0,
+                    text: deleted,
+                },
+                cursor_before: self.engine.state.cursor,
+                cursor_after: Position { line, col: 0 },
+                modification_count: mod_count,
+            });
+            self.on_buffer_modified();
+            return;
+        }
+
         if col < end_col {
             let deleted: String = self
                 .engine

@@ -50,6 +50,13 @@ impl Editor {
                         let keymap_name = cmd.trim_start_matches("keymap ").trim();
                         self.switch_keymap(keymap_name);
                     }
+                    cmd if cmd == "b" || cmd.starts_with("b ") => {
+                        let name = cmd.strip_prefix('b').unwrap_or(cmd).trim();
+                        if let Err(e) = self.engine.buffer_switch_by_name(name) {
+                            self.engine.state.push_message(MessageLevel::Error, e);
+                        }
+                        self.needs_render = true;
+                    }
                     "bn" | "bnext" => {
                         if let Err(e) = self.engine.buffer_next() {
                             self.engine.state.push_message(MessageLevel::Error, e);

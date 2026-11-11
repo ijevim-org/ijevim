@@ -835,7 +835,7 @@ async fn emacs_ctrl_y_yanks_from_kill_ring() {
     ed.handle_key_for_test(KeyCode::Char('k'), KeyModifiers::CONTROL)
         .await;
     let (buf, _, _, _) = ed.snapshot_for_test();
-    assert_eq!(buf, "\n", "C-k killed line content");
+    assert_eq!(buf, "", "C-k at bol killed the whole line");
 
     // Yank back at start
     ed.engine.state.cursor.col = 0;

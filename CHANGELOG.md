@@ -23,9 +23,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Emacs: `C-s` / `C-r` incremental search with live preview, and `C-g` cancel.
 - Emacs: `C-x u` / `C-x C-/` undo, `C-M-/` redo, `C-x h` mark-whole-buffer,
   `C-x C-x` exchange point and mark, `M-x` command line.
+- Emacs files and buffers: `C-x C-f` find-file, `C-x C-w` write-file, `C-x b`
+  switch-to-buffer (including the new `:b <name>` command), `C-x k` kill-buffer,
+  and `C-x d` dired.
+- Emacs windows: `C-x 2` split-below, `C-x 3` split-right, `C-x o` / `C-x O`
+  other-window (forward/backward), `C-x 0` delete-window, and `C-x 1`
+  delete-other-windows.
+- Emacs numeric arguments: `C-u`, `M-<digit>` and `M--`, applied to motions,
+  deletion, kills, yanks, self-insert, paging and transpose.
 - Emacs: `CursorState::yank_text` and `UndoManager::push_insert_coalescing` in
   `ijevim-core` (consecutive self-inserts form one undo unit).
-- Tests: `tests/emacs_flow.rs` (18 regression tests) and the opt-in differential
+- Tests: `tests/emacs_flow.rs` (34 regression tests) and the opt-in differential
   harness `tests/emacs_probe.rs` + `scripts/emacs-diff.sh` against `emacs -Q`.
 
 ### Changed
@@ -44,9 +52,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Vim and Emacs modes.
 - Emacs: `C-v` / `M-v` now move by a page (previously half a page), `C-o` opens
   a line (previously saved the file), `C-x h` marks the whole buffer (previously
-  beginning-of-line), `C-x d` is undefined (previously end-of-line), and
+  beginning-of-line), `C-x d` opens dired (previously end-of-line), and
   `C-x u` / `C-x C-/` undo (previously redo).
 - Emacs: inserts, deletes, kills, yanks and transposes are now undoable.
+- Emacs: `C-k` at the beginning of a line now kills the whole line including
+  its newline, matching Emacs (previously it left an empty line behind).
 
 ### Fixed
 

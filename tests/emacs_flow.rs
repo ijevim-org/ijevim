@@ -141,11 +141,11 @@ async fn undefined_c_x_sequence_is_consumed() {
     e.engine.state.cursor.col = 1;
 
     ctrl(&mut e, 'x').await;
-    ctrl(&mut e, 'f').await;
+    ctrl(&mut e, 'q').await;
 
     assert_eq!(
         e.engine.state.cursor.col, 1,
-        "C-x C-f must not fall through to C-f"
+        "C-x C-q must not fall through to a normal binding"
     );
     assert_eq!(e.engine.buffer.to_string(), "abcdef\n");
     assert!(
@@ -181,13 +181,18 @@ async fn multiline_kill_yank_restores_point() {
 async fn consecutive_kills_append_to_one_entry() {
     let mut e = ed("one\ntwo\n");
     ctrl(&mut e, 'k').await;
-    assert_eq!(e.engine.buffer.to_string(), "\ntwo\n");
+    assert_eq!(
+        e.engine.buffer.to_string(),
+        "two\n",
+        "C-k at bol kills the whole line"
+    );
 
     ctrl(&mut e, 'k').await;
+    assert_eq!(e.engine.buffer.to_string(), "");
     assert_eq!(
         e.kill_ring().yank(),
-        Some("one\n"),
-        "the second C-k appends the newline to the first kill"
+        Some("one\ntwo\n"),
+        "the second C-k appends to the first kill"
     );
 
     ctrl(&mut e, 'y').await;
@@ -317,5 +322,229 @@ async fn meta_x_opens_the_command_line() {
     let mut e = ed("x\n");
     alt(&mut e, 'x').await;
     assert_eq!(e.engine.state.mode, Mode::Command);
-    assert_eq!(e.engine.state.command_buffer, ":");
+    assert_eq!(e.engine.state.command_buffer, "");
+}
+
+// ── Numeric arguments ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn c_u_3_moves_three_chars() {
+    let mut e = ed("abcdef\n");
+    ctrl(&mut e, 'u').await;
+    press(&mut e, KeyCode::Char('3'), KeyModifiers::NONE).await;
+    ctrl(&mut e, 'f').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 3 });
+}
+
+#[tokio::test]
+async fn meta_digit_is_a_numeric_argument() {
+    let mut e = ed("abcdef\n");
+    alt(&mut e, '3').await;
+    ctrl(&mut e, 'f').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 3 });
+}
+
+#[tokio::test]
+async fn c_u_defaults_to_four() {
+    let mut e = ed("abcdef\n");
+    ctrl(&mut e, 'u').await;
+    ctrl(&mut e, 'f').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 4 });
+}
+
+#[tokio::test]
+async fn negative_argument_moves_backwards() {
+    let mut e = ed("abcdef\n");
+    e.engine.state.cursor = Position { line: 1, col: 5 };
+    alt(&mut e, '-').await;
+    ctrl(&mut e, 'f').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 4 });
+}
+
+#[tokio::test]
+async fn c_u_repeats_self_insert() {
+    let mut e = ed("");
+    ctrl(&mut e, 'u').await;
+    press(&mut e, KeyCode::Char('2'), KeyModifiers::NONE).await;
+    press(&mut e, KeyCode::Char('x'), KeyModifiers::NONE).await;
+    assert_eq!(e.engine.buffer.to_string(), "xx");
+}
+
+#[tokio::test]
+async fn c_u_repeats_delete() {
+    let mut e = ed("abcdef");
+    ctrl(&mut e, 'u').await;
+    press(&mut e, KeyCode::Char('3'), KeyModifiers::NONE).await;
+    ctrl(&mut e, 'd').await;
+    assert_eq!(e.engine.buffer.to_string(), "def");
+}
+
+#[tokio::test]
+async fn c_u_kills_multiple_lines_in_one_entry() {
+    let mut e = ed("a\nb\nc\n");
+    ctrl(&mut e, 'u').await;
+    press(&mut e, KeyCode::Char('2'), KeyModifiers::NONE).await;
+    ctrl(&mut e, 'k').await;
+    assert_eq!(e.engine.buffer.to_string(), "c\n");
+    assert_eq!(e.kill_ring().yank(), Some("a\nb\n"));
+}
+
+// ── Files and buffers ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn c_x_ctrl_f_opens_a_find_file_prompt() {
+    let mut e = ed("x\n");
+    ctrl(&mut e, 'x').await;
+    ctrl(&mut e, 'f').await;
+    assert_eq!(e.engine.state.mode, Mode::Command);
+    assert!(
+        e.engine.state.command_buffer.starts_with("e "),
+        "got {:?}",
+        e.engine.state.command_buffer
+    );
+}
+
+#[tokio::test]
+async fn c_x_ctrl_w_opens_a_write_file_prompt() {
+    let mut e = ed("x\n");
+    ctrl(&mut e, 'x').await;
+    ctrl(&mut e, 'w').await;
+    assert_eq!(e.engine.state.mode, Mode::Command);
+    assert!(e.engine.state.command_buffer.starts_with("w "));
+}
+
+#[tokio::test]
+async fn c_x_b_opens_a_buffer_prompt() {
+    let mut e = ed("x\n");
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('b'), KeyModifiers::NONE).await;
+    assert_eq!(e.engine.state.mode, Mode::Command);
+    assert_eq!(e.engine.state.command_buffer, "b ");
+}
+
+#[tokio::test]
+async fn c_x_d_opens_a_dired_prompt() {
+    let mut e = ed("x\n");
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('d'), KeyModifiers::NONE).await;
+    assert_eq!(e.engine.state.mode, Mode::Command);
+    assert!(e.engine.state.command_buffer.starts_with("e "));
+}
+
+#[tokio::test]
+async fn c_x_k_refuses_to_kill_a_modified_buffer() {
+    let mut e = ed("x\n");
+    press(&mut e, KeyCode::Char('z'), KeyModifiers::NONE).await;
+    let before = e.engine.buffer.to_string();
+
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('k'), KeyModifiers::NONE).await;
+
+    assert_eq!(e.engine.buffer.to_string(), before);
+    assert!(
+        e.engine
+            .state
+            .last_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("modified"),
+        "the refusal must be reported"
+    );
+}
+
+#[tokio::test]
+async fn c_x_b_switches_by_file_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.txt");
+    std::fs::write(&first, "first\n").expect("write first");
+    std::fs::write(&second, "second\n").expect("write second");
+
+    let mut e = ed("scratch\n");
+    e.engine
+        .buffer_open(first.to_str().unwrap())
+        .expect("open first");
+    e.engine
+        .buffer_open(second.to_str().unwrap())
+        .expect("open second");
+    assert_eq!(e.engine.buffer.to_string(), "second\n");
+
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('b'), KeyModifiers::NONE).await;
+    for c in "first.txt".chars() {
+        press(&mut e, KeyCode::Char(c), KeyModifiers::NONE).await;
+    }
+    press(&mut e, KeyCode::Enter, KeyModifiers::NONE).await;
+
+    assert_eq!(e.engine.buffer.to_string(), "first\n");
+    assert_eq!(e.engine.state.file_path.as_deref(), Some(first.as_path()));
+}
+
+// ── Windows ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn c_x_window_commands_split_focus_and_close() {
+    let mut e = ed("x\n");
+    e.engine.update_window_layout(24, 80);
+
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('2'), KeyModifiers::NONE).await;
+    assert_eq!(e.engine.window_layout.windows.len(), 2, "C-x 2 splits");
+
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('3'), KeyModifiers::NONE).await;
+    assert_eq!(e.engine.window_layout.windows.len(), 3, "C-x 3 splits");
+
+    let before = e.engine.window_layout.focused;
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('o'), KeyModifiers::NONE).await;
+    assert_ne!(
+        e.engine.window_layout.focused, before,
+        "C-x o moves focus to another window"
+    );
+
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('0'), KeyModifiers::NONE).await;
+    assert_eq!(
+        e.engine.window_layout.windows.len(),
+        2,
+        "C-x 0 closes the focused window"
+    );
+
+    ctrl(&mut e, 'x').await;
+    press(&mut e, KeyCode::Char('1'), KeyModifiers::NONE).await;
+    assert_eq!(
+        e.engine.window_layout.windows.len(),
+        1,
+        "C-x 1 closes every other window"
+    );
+}
+
+#[tokio::test]
+async fn zero_argument_does_not_move() {
+    let mut e = ed("abcdef\n");
+    ctrl(&mut e, 'u').await;
+    press(&mut e, KeyCode::Char('0'), KeyModifiers::NONE).await;
+    ctrl(&mut e, 'f').await;
+    assert_eq!(e.engine.state.cursor, Position { line: 1, col: 0 });
+}
+
+#[tokio::test]
+async fn c_x_ctrl_w_saves_to_the_typed_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("written.txt");
+
+    let mut e = ed("hello\n");
+    ctrl(&mut e, 'x').await;
+    ctrl(&mut e, 'w').await;
+    for c in path.to_string_lossy().chars() {
+        press(&mut e, KeyCode::Char(c), KeyModifiers::NONE).await;
+    }
+    press(&mut e, KeyCode::Enter, KeyModifiers::NONE).await;
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("written file"),
+        "hello\n"
+    );
+    assert_eq!(e.engine.state.file_path.as_deref(), Some(path.as_path()));
 }

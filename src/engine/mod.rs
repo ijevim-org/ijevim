@@ -296,6 +296,57 @@ impl Engine {
         Ok(())
     }
 
+    /// Switch to a buffer by file name (`C-x b`).
+    ///
+    /// An empty name means "the other buffer" (same as `buffer_next`). A name
+    /// matches either the exact file name or the full path.
+    pub fn buffer_switch_by_name(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return self.buffer_next();
+        }
+
+        let name_of = |path: &Option<PathBuf>| -> String {
+            path.as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "[No Name]".to_string())
+        };
+
+        if name_of(&self.state.file_path) == name
+            || self
+                .state
+                .file_path
+                .as_ref()
+                .is_some_and(|p| p.to_string_lossy() == name)
+        {
+            return Ok(());
+        }
+
+        let target_idx = self
+            .inactive_buffers
+            .iter()
+            .position(|(_, _, path, _)| {
+                name_of(path) == name || path.as_ref().is_some_and(|p| p.to_string_lossy() == name)
+            })
+            .ok_or_else(|| format!("No buffer matching '{}'", name))?;
+
+        let current = (
+            std::mem::take(&mut self.buffer),
+            std::mem::take(&mut self.undo_manager),
+            self.state.file_path.take(),
+            self.state.cursor,
+        );
+        let target = self.inactive_buffers.remove(target_idx);
+        self.inactive_buffers.push(current);
+        self.buffer = target.0;
+        self.undo_manager = target.1;
+        self.state.file_path = target.2;
+        self.state.cursor = target.3;
+        self.state.dirty = self.buffer.is_dirty();
+        Ok(())
+    }
+
     /// Delete the current buffer and switch to the next (`:bdelete`).
     pub fn buffer_delete(&mut self) -> Result<(), String> {
         if self.inactive_buffers.is_empty() {
@@ -540,6 +591,25 @@ impl Engine {
         self.window_layout.windows[new_focused].cursor = self.state.cursor;
         self.window_layout.windows[new_focused].scroll_top = self.state.cursor.line;
 
+        Ok(())
+    }
+
+    /// Focus the previous window (Emacs `C-x O`).
+    pub fn focus_prev_window(&mut self) -> Result<(), String> {
+        let prev = if self.window_layout.focused == 0 {
+            self.window_layout.windows.len().saturating_sub(1)
+        } else {
+            self.window_layout.focused - 1
+        };
+        self.focus_window(prev)
+    }
+
+    /// Close every window except the focused one (Emacs `C-x 1`).
+    pub fn close_other_windows(&mut self) -> Result<(), String> {
+        if self.window_layout.windows.len() <= 1 {
+            return Err("Already only one window".to_string());
+        }
+        self.window_layout.close_other_windows();
         Ok(())
     }
 
