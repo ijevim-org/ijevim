@@ -14,7 +14,7 @@ rust-version = "1.74"
 description = "A minimal Vim-like TUI editor written in Rust"
 authors = ["NazoVim-org"]
 license = "MIT"
-repository = "https://github.com/NazoVim-org/ijevim"
+repository = "https://github.com/ijevim-org/ijevim"
 
 [workspace.dependencies]
 # Internal crates.
