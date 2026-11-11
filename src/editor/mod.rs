@@ -426,6 +426,17 @@ impl Editor {
             return;
         }
 
+        // ── Command-line mode ──
+        // The command line is shared by every keymap: Vim enters it with `:`,
+        // `/`, `?` and Emacs with `C-s`, `C-r`, `M-x`. Routing it here (rather
+        // than inside VimKeymap) keeps Emacs from sending command-line keys to
+        // the buffer.
+        if self.engine.state.mode == Mode::Command {
+            self.emit_key_event(key, modifiers);
+            self.handle_command(key, modifiers).await;
+            return;
+        }
+
         let keymap_handler = Rc::clone(&self.keymap_handler);
         // Borrow the handler, call the method to get the future, then drop the
         // borrow before awaiting. The future borrows `self` (Editor) but not
@@ -535,12 +546,22 @@ impl Editor {
 
     pub fn undo(&mut self) {
         let result = self.engine.undo();
+        self.clear_yank_chain();
         self.apply_result(result);
     }
 
     pub fn redo(&mut self) {
         let result = self.engine.redo();
+        self.clear_yank_chain();
         self.apply_result(result);
+    }
+
+    /// A yank-pop cycle must not survive an undo/redo: the replaced text no
+    /// longer matches what `yank-pop` would remove.
+    fn clear_yank_chain(&mut self) {
+        self.engine.cursor_state.yank_start = None;
+        self.engine.cursor_state.yank_length = 0;
+        self.engine.cursor_state.yank_text.clear();
     }
 
     pub fn show_file_info(&mut self) {

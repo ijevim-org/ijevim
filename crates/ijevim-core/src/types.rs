@@ -714,6 +714,22 @@ impl KillRing {
         self.index = 0;
     }
 
+    /// Append to the most recent entry instead of creating a new one.
+    ///
+    /// Emacs treats consecutive kill commands (`C-k`, `C-w`, ...) as one
+    /// logical kill, so the second one must extend the first entry rather than
+    /// push a separate one.
+    pub fn push_append(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match self.entries.first_mut() {
+            Some(entry) => entry.push_str(text),
+            None => self.push(text),
+        }
+        self.index = 0;
+    }
+
     pub fn yank(&self) -> Option<&str> {
         self.entries.first().map(|s| s.as_str())
     }

@@ -223,7 +223,7 @@ impl Editor {
                     self.needs_render = true;
                 }
             }
-            KeyCode::Esc | KeyCode::Char('c')
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('g')
                 if key == KeyCode::Esc || modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 self.cancel_search_preview();

@@ -118,6 +118,43 @@ impl UndoManager {
         }
     }
 
+    /// Push an insertion, merging it into the previous undo node when both are
+    /// contiguous single-line insertions with no undo boundary between them.
+    ///
+    /// Emacs groups consecutive self-inserting characters into one undo unit.
+    /// Coalescing is only attempted when the current node is a leaf, so typing
+    /// after an undo creates a new branch instead of rewriting history.
+    pub fn push_insert_coalescing(&mut self, edit: Edit) {
+        let current = self.current;
+        let joins = self.nodes[current].children.is_empty()
+            && match (&self.nodes[current].edit.edit_type, &edit.edit_type) {
+                (
+                    EditType::Insert { line, col, text },
+                    EditType::Insert {
+                        line: new_line,
+                        col: new_col,
+                        text: new_text,
+                    },
+                ) => {
+                    !new_text.contains('\n')
+                        && *new_line == *line
+                        && *new_col == *col + text.chars().count()
+                }
+                _ => false,
+            };
+        if joins {
+            if let (EditType::Insert { text, .. }, EditType::Insert { text: new_text, .. }) =
+                (&mut self.nodes[current].edit.edit_type, &edit.edit_type)
+            {
+                text.push_str(new_text);
+            }
+            self.nodes[current].edit.cursor_after = edit.cursor_after;
+            self.nodes[current].edit.modification_count = edit.modification_count;
+            return;
+        }
+        self.push(edit);
+    }
+
     /// Number of nodes still attached to the tree.
     fn live_node_count(&self) -> usize {
         self.nodes.iter().filter(|n| !n.removed).count()
@@ -284,7 +321,9 @@ impl UndoManager {
             }
             EditType::Split { line, col } => {
                 let start = buffer.line_to_char(line - 1) + col;
-                if start < buffer.len_chars() && start > 0 {
+                // A split at column 0 of line 1 has `start == 0`; it still
+                // inserted a newline that must be removed on undo.
+                if start < buffer.len_chars() {
                     buffer.remove_range(start, start + 1);
                 }
             }
