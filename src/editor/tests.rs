@@ -15,6 +15,7 @@ fn test_editor(keymap: Keymap) -> Editor {
     let plugin_manager = PluginManager::new();
     let state = EditorState {
         mode: Mode::Normal,
+        keymap,
         cursor: crate::types::Position { line: 1, col: 0 },
         file_path: None,
         dirty: false,

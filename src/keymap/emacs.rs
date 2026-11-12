@@ -55,12 +55,12 @@ fn default_directory(editor: &Editor) -> String {
 
 /// Start a numeric argument (`C-u`): each use multiplies by four.
 fn start_universal_arg(editor: &mut Editor) {
-    let state = &mut editor.engine.operator_state;
-    state.emacs_numeric_arg = Some(match state.emacs_numeric_arg {
+    let state = &mut editor.engine.emacs_state;
+    state.numeric_arg = Some(match state.numeric_arg {
         None => 4,
         Some(n) => n.saturating_mul(4),
     });
-    state.emacs_numeric_arg_digits = false;
+    state.numeric_arg_digits = false;
 }
 
 /// Append a digit to the numeric argument (`C-u 3`, `M-3`).
@@ -68,20 +68,20 @@ fn push_arg_digit(editor: &mut Editor, digit: char) {
     let Some(digit) = digit.to_digit(10).map(|d| d as i32) else {
         return;
     };
-    let state = &mut editor.engine.operator_state;
-    if !state.emacs_numeric_arg_digits {
+    let state = &mut editor.engine.emacs_state;
+    if !state.numeric_arg_digits {
         // The first digit replaces the implicit 4 from `C-u`, keeping a sign
         // that `M--` may have set.
-        let sign = if state.emacs_numeric_arg.unwrap_or(1) < 0 {
+        let sign = if state.numeric_arg.unwrap_or(1) < 0 {
             -1
         } else {
             1
         };
-        state.emacs_numeric_arg = Some(sign * digit);
-        state.emacs_numeric_arg_digits = true;
+        state.numeric_arg = Some(sign * digit);
+        state.numeric_arg_digits = true;
     } else {
-        let n = state.emacs_numeric_arg.unwrap_or(0);
-        state.emacs_numeric_arg = Some(if n < 0 {
+        let n = state.numeric_arg.unwrap_or(0);
+        state.numeric_arg = Some(if n < 0 {
             n.saturating_mul(10).saturating_sub(digit)
         } else {
             n.saturating_mul(10).saturating_add(digit)
@@ -91,16 +91,16 @@ fn push_arg_digit(editor: &mut Editor, digit: char) {
 
 /// Start or negate the numeric argument with a minus sign.
 fn push_arg_minus(editor: &mut Editor) {
-    let state = &mut editor.engine.operator_state;
-    state.emacs_numeric_arg = Some(-state.emacs_numeric_arg.unwrap_or(1).abs());
-    state.emacs_numeric_arg_digits = false;
+    let state = &mut editor.engine.emacs_state;
+    state.numeric_arg = Some(-state.numeric_arg.unwrap_or(1).abs());
+    state.numeric_arg_digits = false;
 }
 
 /// Consume the numeric argument, returning `(count, reverse)`.
 fn take_numeric_arg(editor: &mut Editor) -> (usize, bool) {
-    let state = &mut editor.engine.operator_state;
-    let arg = state.emacs_numeric_arg.take().unwrap_or(1);
-    state.emacs_numeric_arg_digits = false;
+    let state = &mut editor.engine.emacs_state;
+    let arg = state.numeric_arg.take().unwrap_or(1);
+    state.numeric_arg_digits = false;
     (arg.unsigned_abs() as usize, arg < 0)
 }
 
@@ -136,7 +136,7 @@ impl KeymapHandler for EmacsKeymap {
             // A prefix always consumes its second key. An undefined sequence
             // must not fall through to the normal bindings: `C-x C-q` is not
             // `C-q`, it is simply unbound.
-            if let Some(prefix) = editor.engine.operator_state.emacs_prefix.take() {
+            if let Some(prefix) = editor.engine.emacs_state.prefix.take() {
                 // A numeric argument before a prefix sequence is ignored by
                 // the prefix commands themselves; consume it so it cannot
                 // leak into the key after the sequence.
@@ -348,9 +348,7 @@ impl KeymapHandler for EmacsKeymap {
             // Digits extend an argument already started by `C-u` / `M-3`.
             if !has_ctrl && !has_alt {
                 if let KeyCode::Char(c) = key {
-                    if c.is_ascii_digit()
-                        && editor.engine.operator_state.emacs_numeric_arg.is_some()
-                    {
+                    if c.is_ascii_digit() && editor.engine.emacs_state.numeric_arg.is_some() {
                         push_arg_digit(editor, c);
                         editor.needs_render = true;
                         return;
@@ -373,7 +371,7 @@ impl KeymapHandler for EmacsKeymap {
             // other command terminates the kill chain.
             let is_kill = has_ctrl && matches!(key, KeyCode::Char('k') | KeyCode::Char('w'));
             if !is_kill {
-                editor.engine.operator_state.last_command_was_kill = false;
+                editor.engine.emacs_state.last_command_was_kill = false;
             }
 
             // `M-y` is only meaningful immediately after a yank.
@@ -387,35 +385,35 @@ impl KeymapHandler for EmacsKeymap {
 
             match (has_ctrl, key) {
                 (true, KeyCode::Char('x')) => {
-                    editor.engine.operator_state.emacs_prefix = Some('x');
+                    editor.engine.emacs_state.prefix = Some('x');
                     editor.needs_render = true;
                 }
                 (true, KeyCode::Char('f')) => {
                     if reverse {
-                        editor.cursor_left(count);
+                        editor.point_left(count);
                     } else {
-                        editor.cursor_right(count);
+                        editor.point_right(count);
                     }
                 }
                 (true, KeyCode::Char('b')) => {
                     if reverse {
-                        editor.cursor_right(count);
+                        editor.point_right(count);
                     } else {
-                        editor.cursor_left(count);
+                        editor.point_left(count);
                     }
                 }
                 (true, KeyCode::Char('n')) => {
                     if reverse {
-                        editor.cursor_up(count);
+                        editor.point_up(count);
                     } else {
-                        editor.cursor_down(count);
+                        editor.point_down(count);
                     }
                 }
                 (true, KeyCode::Char('p')) => {
                     if reverse {
-                        editor.cursor_down(count);
+                        editor.point_down(count);
                     } else {
-                        editor.cursor_up(count);
+                        editor.point_up(count);
                     }
                 }
                 (true, KeyCode::Char('a')) => {
@@ -458,7 +456,7 @@ impl KeymapHandler for EmacsKeymap {
                             MessageLevel::Info,
                             "The mark is not set now, so there is no region".to_string(),
                         );
-                        editor.engine.operator_state.last_command_was_kill = false;
+                        editor.engine.emacs_state.last_command_was_kill = false;
                         editor.needs_render = true;
                     }
                 }
@@ -480,10 +478,7 @@ impl KeymapHandler for EmacsKeymap {
                 }
                 (true, KeyCode::Char('v')) => {
                     // Emacs `C-v` scrolls forward (and moves point).
-                    for _ in 0..count {
-                        editor.page_down();
-                    }
-                    editor.needs_render = true;
+                    editor.point_page_down(count);
                 }
                 (true, KeyCode::Char('l')) => {
                     // Emacs `C-l` recenters point; it does not clear the screen.
@@ -539,30 +534,30 @@ impl KeymapHandler for EmacsKeymap {
                 }
                 (false, KeyCode::Up) => {
                     if reverse {
-                        editor.cursor_down(count);
+                        editor.point_down(count);
                     } else {
-                        editor.cursor_up(count);
+                        editor.point_up(count);
                     }
                 }
                 (false, KeyCode::Down) => {
                     if reverse {
-                        editor.cursor_up(count);
+                        editor.point_up(count);
                     } else {
-                        editor.cursor_down(count);
+                        editor.point_down(count);
                     }
                 }
                 (false, KeyCode::Left) => {
                     if reverse {
-                        editor.cursor_right(count);
+                        editor.point_right(count);
                     } else {
-                        editor.cursor_left(count);
+                        editor.point_left(count);
                     }
                 }
                 (false, KeyCode::Right) => {
                     if reverse {
-                        editor.cursor_left(count);
+                        editor.point_left(count);
                     } else {
-                        editor.cursor_right(count);
+                        editor.point_right(count);
                     }
                 }
                 (false, KeyCode::Home) => {
@@ -572,28 +567,21 @@ impl KeymapHandler for EmacsKeymap {
                     editor.cursor_line_end_point();
                 }
                 (false, KeyCode::PageUp) => {
-                    for _ in 0..count {
-                        editor.scroll_up();
-                    }
+                    editor.point_page_up(count);
                 }
                 (false, KeyCode::PageDown) => {
-                    for _ in 0..count {
-                        editor.scroll_down();
-                    }
+                    editor.point_page_down(count);
                 }
                 _ => {
                     // Alt/Meta keybindings
                     if has_alt {
                         match key {
                             KeyCode::Char('f') => {
-                                for _ in 0..count {
-                                    if reverse {
-                                        editor.move_word_backward();
-                                    } else {
-                                        editor.move_word_forward();
-                                    }
+                                if reverse {
+                                    editor.point_backward_word(count);
+                                } else {
+                                    editor.point_forward_word(count);
                                 }
-                                editor.needs_render = true;
                             }
                             KeyCode::Char('<') => {
                                 editor.engine.state.cursor = Position { line: 1, col: 0 };
@@ -653,25 +641,19 @@ impl KeymapHandler for EmacsKeymap {
                                 editor.needs_render = true;
                             }
                             KeyCode::Char('g') => {
-                                editor.engine.operator_state.emacs_prefix = Some('g');
+                                editor.engine.emacs_state.prefix = Some('g');
                                 editor.needs_render = true;
                             }
                             KeyCode::Char('b') => {
-                                for _ in 0..count {
-                                    if reverse {
-                                        editor.move_word_forward();
-                                    } else {
-                                        editor.move_word_backward();
-                                    }
+                                if reverse {
+                                    editor.point_forward_word(count);
+                                } else {
+                                    editor.point_backward_word(count);
                                 }
-                                editor.needs_render = true;
                             }
                             KeyCode::Char('v') => {
                                 // Emacs `M-v` scrolls backward.
-                                for _ in 0..count {
-                                    editor.page_up();
-                                }
-                                editor.needs_render = true;
+                                editor.point_page_up(count);
                             }
                             KeyCode::Char('w') if editor.has_active_region() => {
                                 editor.copy_region();

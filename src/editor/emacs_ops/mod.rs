@@ -22,9 +22,21 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Emacs syntax class used by word motions: whitespace, word, or punctuation.
+fn char_class(c: char) -> u8 {
+    if c.is_whitespace() {
+        0
+    } else if is_word_char(c) {
+        1
+    } else {
+        2
+    }
+}
+
 mod case;
 mod editing;
 mod kill;
+mod motion;
 mod region;
 mod yank;
 
@@ -35,6 +47,9 @@ impl Editor {
     }
 
     pub fn abort(&mut self) {
+        // Emacs `C-g` (keyboard-quit) cancels any prefix or numeric argument
+        // in addition to leaving the minibuffer.
+        self.engine.emacs_state.reset();
         self.engine.state.command_buffer.clear();
         self.engine.state.command_cursor_pos = 0;
         if self.engine.state.mode == crate::types::Mode::Command {
@@ -49,12 +64,12 @@ impl Editor {
         if text.is_empty() {
             return;
         }
-        if self.engine.operator_state.last_command_was_kill {
+        if self.engine.emacs_state.last_command_was_kill {
             self.engine.kill_ring.push_append(text);
         } else {
             self.engine.kill_ring.push(text);
         }
-        self.engine.operator_state.last_command_was_kill = true;
+        self.engine.emacs_state.last_command_was_kill = true;
 
         // Keep the unnamed register in sync with the whole logical kill.
         if let Some(top) = self.engine.kill_ring.yank() {
@@ -113,6 +128,51 @@ impl Editor {
             None
         } else {
             Some((start, end))
+        }
+    }
+
+    /// Span from the start of the previous Emacs word to point.
+    ///
+    /// Whitespace (including newlines) separates words; a run of punctuation
+    /// counts as one word, matching Emacs' default syntax table and the
+    /// forward counterpart above.
+    fn backward_word_bounds(&self, start: Position) -> Option<(Position, Position)> {
+        let first = 1usize;
+        let mut line = start.line.max(first);
+        let mut col = start.col;
+
+        loop {
+            if col > 0 {
+                let len = self.engine.buffer.line_content_len(line);
+                col = col.min(len);
+                if col > 0 {
+                    let chars = self.engine.buffer.line_chars(line);
+                    if char_class(chars[col - 1]) != 0 {
+                        break;
+                    }
+                    col -= 1;
+                    continue;
+                }
+            }
+            if line > first {
+                line -= 1;
+                col = self.engine.buffer.line_content_len(line);
+            } else {
+                return None;
+            }
+        }
+
+        let chars = self.engine.buffer.line_chars(line);
+        let class = char_class(chars[col - 1]);
+        while col > 0 && char_class(chars[col - 1]) == class {
+            col -= 1;
+        }
+
+        let from = Position { line, col };
+        if from == start {
+            None
+        } else {
+            Some((from, start))
         }
     }
 }

@@ -192,16 +192,6 @@ impl Editor {
         self.needs_render = true;
     }
 
-    /// Emacs' `C-e`: point rests *before* the newline, i.e. one past the last
-    /// character. Kept separate because the two editors disagree here.
-    pub(crate) fn cursor_line_end_point(&mut self) {
-        self.engine.state.cursor.col = self
-            .engine
-            .buffer
-            .line_content_len(self.engine.state.cursor.line);
-        self.needs_render = true;
-    }
-
     /// First column of the next word, or the last column of the line when
     /// there is none.
     ///

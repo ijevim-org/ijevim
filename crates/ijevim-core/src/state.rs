@@ -42,26 +42,6 @@ pub struct OperatorState {
     pub replace_char: Option<char>,
     /// Ctrl-w prefix: waiting for second key (w, j, k, h, l, c, =, _, |, etc.)
     pub ctrl_w_prefix: bool,
-    /// Emacs prefix key that is awaiting its second key.
-    ///
-    /// `Some('x')` means `C-x` was pressed. Keeping the prefix as data (rather
-    /// than a boolean) lets the Emacs keymap consume undefined sequences
-    /// instead of leaking the second key into the normal bindings.
-    pub emacs_prefix: Option<char>,
-    /// True when the previous Emacs command was a kill.
-    ///
-    /// Consecutive kills append to the same kill-ring entry; any other command
-    /// clears this flag. Vim's `dd`/`yy` path does not use it.
-    pub last_command_was_kill: bool,
-    /// Emacs numeric argument (`C-u`, `M-3`, ...) awaiting its command.
-    ///
-    /// `None` means no argument is active. Negative values make directional
-    /// commands run backwards.
-    pub emacs_numeric_arg: Option<i32>,
-    /// Whether any digit has been typed into the current numeric argument.
-    ///
-    /// `C-u 3` means 3, not 43: the first digit replaces the implicit 4.
-    pub emacs_numeric_arg_digits: bool,
 }
 
 impl OperatorState {
@@ -74,15 +54,49 @@ impl OperatorState {
         self.macro_play = None;
         self.replace_char = None;
         self.ctrl_w_prefix = false;
-        self.emacs_prefix = None;
-        self.last_command_was_kill = false;
-        self.emacs_numeric_arg = None;
-        self.emacs_numeric_arg_digits = false;
     }
 
     /// Take the accumulated count, defaulting to 1 if absent.
     pub fn take_count(&mut self) -> usize {
         self.count.take().unwrap_or(1)
+    }
+}
+
+/// Tracks Emacs keymap state independently of Vim's operator machine.
+///
+/// Emacs is modeless, so it has no operator/count/register machine. Its only
+/// transient input state is the prefix key (`C-x`, `M-g`, ...), the numeric
+/// argument (`C-u`, `M-3`, ...), and the kill-chain flag used by the kill ring.
+/// Keeping these separate prevents Vim sequences and Emacs sequences from
+/// reading or clearing each other's state.
+#[derive(Debug, Clone, Default)]
+pub struct EmacsState {
+    /// Emacs prefix key awaiting its second key.
+    ///
+    /// `Some('x')` means `C-x` was pressed. Keeping the prefix as data (rather
+    /// than a boolean) lets the Emacs keymap consume undefined sequences
+    /// instead of leaking the second key into the normal bindings.
+    pub prefix: Option<char>,
+    /// True when the previous Emacs command was a kill.
+    ///
+    /// Consecutive kills append to the same kill-ring entry; any other command
+    /// clears this flag.
+    pub last_command_was_kill: bool,
+    /// Emacs numeric argument (`C-u`, `M-3`, ...) awaiting its command.
+    ///
+    /// `None` means no argument is active. Negative values make directional
+    /// commands run backwards.
+    pub numeric_arg: Option<i32>,
+    /// Whether any digit has been typed into the current numeric argument.
+    ///
+    /// `C-u 3` means 3, not 43: the first digit replaces the implicit 4.
+    pub numeric_arg_digits: bool,
+}
+
+impl EmacsState {
+    /// Reset every transient Emacs input state.
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 

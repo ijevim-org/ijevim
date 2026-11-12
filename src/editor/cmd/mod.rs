@@ -248,6 +248,7 @@ impl Editor {
                     }
                 }
 
+                self.engine.emacs_state.reset();
                 if !self.engine.state.has_confirmation() {
                     self.transition_mode(Mode::Normal);
                     self.needs_render = true;
@@ -261,6 +262,7 @@ impl Editor {
                 self.engine.state.command_cursor_pos = 0;
                 self.engine.state.command_hint = None;
                 self.completion_session = None;
+                self.engine.emacs_state.reset();
                 self.transition_mode(Mode::Normal);
                 self.needs_render = true;
             }

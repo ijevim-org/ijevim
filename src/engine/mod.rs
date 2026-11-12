@@ -3,7 +3,7 @@ use crate::highlight::Style;
 use crate::plugin::PluginManager;
 use crate::register::Register;
 use crate::review::ReviewState;
-use crate::state::{CursorState, InsertState, OperatorState, SearchState};
+use crate::state::{CursorState, EmacsState, InsertState, OperatorState, SearchState};
 use crate::types::{ConfirmAction, DotAction, EditorState, KillRing, Mode, Position};
 use crate::undo::UndoManager;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -56,6 +56,8 @@ pub struct Engine {
     pub register: Register,
     pub state: EditorState,
     pub operator_state: OperatorState,
+    /// Emacs keymap input state, kept separate from Vim's operator machine.
+    pub emacs_state: EmacsState,
     pub search_state: SearchState,
     pub insert_state: InsertState,
     pub cursor_state: CursorState,
@@ -86,6 +88,7 @@ impl Engine {
             register: Register::new(),
             state,
             operator_state: OperatorState::default(),
+            emacs_state: EmacsState::default(),
             search_state: SearchState::default(),
             insert_state: InsertState::default(),
             cursor_state: CursorState::default(),
@@ -240,11 +243,18 @@ impl Engine {
     /// Reset operator state, mode, command buffer on keymap switch.
     pub fn reset_state_for_keymap_switch(&mut self) {
         self.operator_state.reset();
+        self.emacs_state.reset();
+        self.insert_state = InsertState::default();
+        self.cursor_state = CursorState::default();
         self.state.mode = Mode::Normal;
         self.state.visual_start = None;
         self.state.visual_type = None;
+        // Emacs regions are keymap-local; the mark itself is user data and
+        // survives a switch, but the active region must not leak into Vim.
+        self.state.region_active = false;
         self.state.command_buffer.clear();
         self.state.command_cursor_pos = 0;
+        self.state.command_hint = None;
     }
 
     pub fn take_count(&mut self) -> usize {

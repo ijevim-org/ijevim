@@ -142,10 +142,11 @@ impl Editor {
         terminal: Terminal,
         buffer: TextBuffer,
         plugin_manager: PluginManager,
-        state: EditorState,
+        mut state: EditorState,
         keymap: Keymap,
         cfg: Config,
     ) -> Self {
+        state.keymap = keymap;
         Self {
             engine: Engine::new(buffer, plugin_manager, state),
             terminal,
@@ -510,7 +511,18 @@ impl Editor {
         };
         self.keymap_handler = create_keymap(keymap);
         self.current_keymap = keymap;
+        self.engine.state.keymap = keymap;
         self.engine.reset_state_for_keymap_switch();
+
+        // Keymap-local transient UI state must not leak into the next keymap.
+        self.block_insert = None;
+        self.one_shot_normal = false;
+        self.search_preview = None;
+        self.completion_session = None;
+        self.history_index = None;
+        self.history_draft.clear();
+        self.engine.state.command_hint = None;
+
         self.needs_render = true;
     }
 
@@ -539,6 +551,7 @@ impl Editor {
         // Switch to review keymap
         self.keymap_handler = create_keymap(Keymap::Review);
         self.current_keymap = Keymap::Review;
+        self.engine.state.keymap = Keymap::Review;
         self.engine.state.mode = Mode::Normal;
         self.needs_render = true;
     }
@@ -548,6 +561,7 @@ impl Editor {
         let restore = self.saved_keymap.take().unwrap_or(Keymap::Vim);
         self.keymap_handler = create_keymap(restore);
         self.current_keymap = restore;
+        self.engine.state.keymap = restore;
         self.engine.review_state = None;
         self.engine.reset_state_for_keymap_switch();
         self.needs_render = true;

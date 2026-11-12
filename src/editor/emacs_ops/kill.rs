@@ -37,11 +37,9 @@ impl Editor {
 
     pub fn kill_word_backward(&mut self) {
         let point = self.engine.state.cursor;
-        let (line, col) = self.word_backward_pos(point.line, point.col, false);
-        let from = Position { line, col };
-        if from == point {
+        let Some((from, _)) = self.backward_word_bounds(point) else {
             return;
-        }
+        };
         let deleted = self
             .engine
             .buffer

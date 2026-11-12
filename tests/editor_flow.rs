@@ -113,13 +113,24 @@ async fn emacs_input_flow_and_boundaries() {
     editor
         .handle_key_for_test(KeyCode::Char('f'), KeyModifiers::CONTROL)
         .await;
+    // Point is now at end of buffer, so Emacs C-d has nothing to delete.
     editor
         .handle_key_for_test(KeyCode::Char('d'), KeyModifiers::CONTROL)
         .await;
     let (buf, line, col, mode) = editor.snapshot_for_test();
+    assert_eq!(buf, "x");
+    assert_eq!((line, col), (1, 1));
+    assert_eq!(mode, Mode::Normal);
+
+    editor
+        .handle_key_for_test(KeyCode::Char('b'), KeyModifiers::CONTROL)
+        .await;
+    editor
+        .handle_key_for_test(KeyCode::Char('d'), KeyModifiers::CONTROL)
+        .await;
+    let (buf, line, col, _) = editor.snapshot_for_test();
     assert_eq!(buf, "");
     assert_eq!((line, col), (1, 0));
-    assert_eq!(mode, Mode::Normal);
 }
 
 #[tokio::test]
@@ -611,7 +622,7 @@ async fn emacs_meta_f_moves_word_forward() {
     ed.handle_key_for_test(KeyCode::Char('f'), KeyModifiers::ALT)
         .await;
     let (_, _, col, _) = ed.snapshot_for_test();
-    assert_eq!(col, 6, "M-f moves to the start of the next word");
+    assert_eq!(col, 5, "M-f moves to the end of the current word");
 }
 
 #[tokio::test]
