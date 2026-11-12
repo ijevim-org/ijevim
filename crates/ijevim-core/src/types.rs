@@ -543,6 +543,9 @@ pub struct Position {
 #[derive(Debug, Clone)]
 pub struct EditorState {
     pub mode: Mode,
+    /// Active input keymap. The renderer uses this for the mode-line label
+    /// (Emacs is modeless, so `mode` alone would display `NORMAL`).
+    pub keymap: Keymap,
     pub cursor: Position,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
@@ -589,6 +592,7 @@ impl Default for EditorState {
     fn default() -> Self {
         Self {
             mode: Mode::Normal,
+            keymap: Keymap::Vim,
             cursor: Position { line: 1, col: 0 },
             file_path: None,
             dirty: false,

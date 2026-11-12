@@ -3,7 +3,9 @@ use crate::screen::{build_styled_chars, CellStyle, ScreenBuffer};
 use crate::terminal::Terminal;
 use crossterm::style::Color;
 use ijevim_core::buffer::TextBuffer;
-use ijevim_core::types::{EditorState, MessageLevel, Mode, VisualType, Window, WindowLayout};
+use ijevim_core::types::{
+    EditorState, Keymap, MessageLevel, Mode, VisualType, Window, WindowLayout,
+};
 use ijevim_highlight::Style;
 use std::io;
 use unicode_width::UnicodeWidthChar;
@@ -25,6 +27,32 @@ const STATUS_ERROR_BG: Color = Color::Red;
 const STATUS_ERROR_FG: Color = Color::White;
 /// Colour for directory entries in a directory listing buffer.
 const DIR_ENTRY_FG: Color = Color::AnsiValue(81);
+
+/// Mode-line label for the current input mode.
+///
+/// Emacs is modeless, so the internal `Mode::Normal` must not be shown as
+/// `NORMAL` when the Emacs keymap is active.
+fn mode_label(state: &EditorState) -> &'static str {
+    if state.region_active {
+        if state.mark == Some(state.cursor) {
+            " MARK "
+        } else {
+            " REGION "
+        }
+    } else if state.keymap == Keymap::Emacs {
+        " EMACS "
+    } else if state.keymap == Keymap::Review {
+        " REVIEW "
+    } else {
+        match state.mode {
+            Mode::Normal => " NORMAL ",
+            Mode::Insert => " INSERT ",
+            Mode::Visual => " VISUAL ",
+            Mode::Command => " COMMAND ",
+            Mode::Replace => " REPLACE ",
+        }
+    }
+}
 
 /// Render context for a single window.
 struct WindowRenderContext<'a> {
@@ -651,21 +679,7 @@ impl Renderer {
         } else if state.show_dashboard {
             " DASHBOARD ".to_string()
         } else {
-            let mode_label = if state.region_active {
-                if state.mark == Some(state.cursor) {
-                    " MARK "
-                } else {
-                    " REGION "
-                }
-            } else {
-                match state.mode {
-                    Mode::Normal => " NORMAL ",
-                    Mode::Insert => " INSERT ",
-                    Mode::Visual => " VISUAL ",
-                    Mode::Command => " COMMAND ",
-                    Mode::Replace => " REPLACE ",
-                }
-            };
+            let mode_label = mode_label(state);
 
             let file = state
                 .file_path
@@ -1071,6 +1085,19 @@ mod tests {
             search_match_ranges("あいう あい", "あい"),
             vec![(0, 2), (4, 6)]
         );
+    }
+
+    #[test]
+    fn keymap_controls_mode_label() {
+        let mut state = EditorState::default();
+        assert_eq!(mode_label(&state), " NORMAL ");
+
+        state.keymap = Keymap::Emacs;
+        assert_eq!(mode_label(&state), " EMACS ");
+
+        state.region_active = true;
+        state.mark = Some(state.cursor);
+        assert_eq!(mode_label(&state), " MARK ");
     }
 
     /// Tabs must not wrap a line that fits once expanded.
