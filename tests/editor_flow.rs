@@ -2941,3 +2941,127 @@ async fn visual_put_with_an_empty_register_returns_to_normal() {
     assert_eq!(buf, "abc\n");
     assert_eq!(mode, Mode::Normal);
 }
+
+/// Send a short key string; `\u{1b}` is Escape. Every key is unmodified.
+async fn send_keys(ed: &mut Editor, keys: &str) {
+    for c in keys.chars() {
+        let key = if c == '\u{1b}' {
+            KeyCode::Esc
+        } else {
+            KeyCode::Char(c)
+        };
+        ed.handle_key_for_test(key, KeyModifiers::NONE).await;
+    }
+}
+
+#[tokio::test]
+async fn undo_after_append_restores_the_original_buffer() {
+    let mut ed = test_vim_editor("abc\n");
+    send_keys(&mut ed, "Axy\u{1b}u").await;
+    assert_eq!(ed.snapshot_for_test().0, "abc\n");
+}
+
+#[tokio::test]
+async fn undo_after_appending_at_end_restores_the_original_buffer() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+    send_keys(&mut ed, "oX\u{1b}u").await;
+    assert_eq!(ed.snapshot_for_test().0, "abc\ndef\n");
+}
+
+#[tokio::test]
+async fn undo_after_open_line_above_restores_the_original_buffer() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+    send_keys(&mut ed, "OX\u{1b}u").await;
+    assert_eq!(ed.snapshot_for_test().0, "abc\ndef\n");
+}
+
+#[tokio::test]
+async fn undo_after_change_word_restores_the_original_buffer() {
+    let mut ed = test_vim_editor("abc def\n");
+    send_keys(&mut ed, "wcwX\u{1b}u").await;
+    assert_eq!(ed.snapshot_for_test().0, "abc def\n");
+}
+
+#[tokio::test]
+async fn undo_after_substitute_restores_the_original_buffer() {
+    let mut ed = test_vim_editor("abc\n");
+    send_keys(&mut ed, "3sX\u{1b}u").await;
+    assert_eq!(ed.snapshot_for_test().0, "abc\n");
+}
+
+#[tokio::test]
+async fn capital_d_keeps_the_line_break() {
+    let mut ed = test_vim_editor("abc\ndef\n");
+    send_keys(&mut ed, "D").await;
+    assert_eq!(ed.snapshot_for_test().0, "\ndef\n");
+}
+
+#[tokio::test]
+async fn capital_d_with_count_in_column_zero_is_linewise() {
+    let mut ed = test_vim_editor("abc\ndef\nghi\n");
+    send_keys(&mut ed, "2D").await;
+    assert_eq!(ed.snapshot_for_test().0, "ghi\n");
+}
+
+#[tokio::test]
+async fn x_stops_at_the_end_of_the_line() {
+    let mut ed = test_vim_editor("abc\n");
+    send_keys(&mut ed, "$3x").await;
+    let (buf, line, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "ab\n");
+    assert_eq!((line, col), (1, 1));
+}
+
+#[tokio::test]
+async fn x_on_an_empty_line_does_not_join_lines() {
+    let mut ed = test_vim_editor("abc\n\ndef\n");
+    send_keys(&mut ed, "jx").await;
+    assert_eq!(ed.snapshot_for_test().0, "abc\n\ndef\n");
+}
+
+#[tokio::test]
+async fn gg_honours_a_count_and_lands_on_first_non_blank() {
+    let mut ed = test_vim_editor("  abc\n  def\n");
+    send_keys(&mut ed, "2gg").await;
+    let (_, line, col, _) = ed.snapshot_for_test();
+    assert_eq!((line, col), (2, 2));
+}
+
+#[tokio::test]
+async fn space_moves_right_like_l() {
+    let mut ed = test_vim_editor("abc def\n");
+    send_keys(&mut ed, "0 x").await;
+    assert_eq!(ed.snapshot_for_test().0, "ac def\n");
+}
+
+#[tokio::test]
+async fn cw_inserts_at_the_end_of_the_line() {
+    let mut ed = test_vim_editor("abc def\n");
+    send_keys(&mut ed, "wcwX\u{1b}").await;
+    let (buf, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "abc X\n");
+    assert_eq!(col, 4);
+}
+
+#[tokio::test]
+async fn inner_bracket_object_works_from_before_the_bracket() {
+    let mut ed = test_vim_editor("foo(bar)\n");
+    send_keys(&mut ed, "di(").await;
+    let (buf, _, col, _) = ed.snapshot_for_test();
+    assert_eq!(buf, "foo()\n");
+    assert_eq!(col, 4);
+}
+
+#[tokio::test]
+async fn inner_bracket_object_picks_the_innermost_pair() {
+    let mut ed = test_vim_editor("a(b(c)d)e\n");
+    send_keys(&mut ed, "4ldi(").await;
+    assert_eq!(ed.snapshot_for_test().0, "a(b()d)e\n");
+}
+
+#[tokio::test]
+async fn inner_bracket_object_across_lines_keeps_the_newlines() {
+    let mut ed = test_vim_editor("foo(\nbar\n)\n");
+    send_keys(&mut ed, "di(").await;
+    assert_eq!(ed.snapshot_for_test().0, "foo(\n)\n");
+}

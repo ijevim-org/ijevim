@@ -196,6 +196,26 @@ impl UndoManager {
         self.nodes[idx].removed = true;
     }
 
+    /// Index of the current node. Used to detect whether an edit was pushed.
+    pub fn current_index(&self) -> usize {
+        self.current
+    }
+
+    /// Remove the current leaf node and return its edit, moving the current
+    /// position back to the parent. Used to fold the deletion of a `c`/`s`
+    /// command into the Insert-mode change that follows it.
+    pub fn pop_last(&mut self) -> Option<Edit> {
+        let idx = self.current;
+        if idx == 0 || !self.nodes[idx].children.is_empty() {
+            return None;
+        }
+        let parent = self.nodes[idx].parent?;
+        let edit = self.nodes[idx].edit.clone();
+        self.remove_node(idx);
+        self.current = parent;
+        Some(edit)
+    }
+
     /// Undo the current edit.
     pub fn undo(&mut self, buffer: &mut TextBuffer) -> Option<Edit> {
         if self.current == 0 {

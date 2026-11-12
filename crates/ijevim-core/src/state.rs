@@ -1,4 +1,5 @@
 use crate::types::{PendingOperator, Position, SearchDirection, SearchResult};
+use crate::undo::Edit;
 
 /// Tracks cursor state related to yank operations.
 ///
@@ -125,6 +126,9 @@ pub struct InsertState {
     pub accum: String,
     /// Cursor position when insert mode was entered (for undo cursor_before).
     pub start_pos: Option<Position>,
+    /// Edits made just before Insert mode (the newline from `o`/`O`, or the
+    /// deletion behind `c`/`s`), committed with the typed text as one change.
+    pub pending_edits: Vec<Edit>,
     /// Set by Ctrl-r in insert mode; the next non-modifier key selects a register.
     pub waiting_register: bool,
     /// Set by Ctrl-v in insert mode; the next key is inserted literally.

@@ -1,6 +1,6 @@
 use crate::editor::Editor;
 use crate::types::DotAction;
-use crate::types::{Mode, Operator, PendingOperator, PluginEvent, VisualType};
+use crate::types::{Mode, Operator, PendingOperator, PluginEvent, Position, VisualType};
 use crossterm::event::KeyCode;
 
 mod edits;
@@ -42,7 +42,7 @@ impl Editor {
                 self.engine.state.cursor.col = self.engine.state.cursor.col.saturating_sub(count);
                 self.needs_render = true;
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char('l') | KeyCode::Char(' ') => {
                 let count = self.take_count();
                 let max_col = self
                     .engine
@@ -103,7 +103,6 @@ impl Editor {
                 let _count = self.take_count();
                 let prev_mode = self.engine.state.mode;
                 self.engine.insert_state.accum.clear();
-                self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
                 if self.engine.state.cursor.col
                     < self
                         .engine
@@ -112,6 +111,7 @@ impl Editor {
                 {
                     self.engine.state.cursor.col += 1;
                 }
+                self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
                 self.engine.state.mode = Mode::Insert;
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
                     from: prev_mode,
@@ -123,12 +123,12 @@ impl Editor {
                 let _count = self.take_count();
                 let prev_mode = self.engine.state.mode;
                 self.engine.insert_state.accum.clear();
-                self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
                 let line_len = self
                     .engine
                     .buffer
                     .line_content_len(self.engine.state.cursor.line);
                 self.engine.state.cursor.col = line_len;
+                self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
                 self.engine.state.mode = Mode::Insert;
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
                     from: prev_mode,
@@ -169,22 +169,15 @@ impl Editor {
             }
             KeyCode::Char('D') => {
                 let count = self.take_count();
-                for _ in 0..count {
-                    self.kill_line();
-                }
+                self.delete_to_line_end('"', count);
             }
             KeyCode::Char('C') => {
                 let count = self.take_count();
-                for _ in 0..count {
-                    self.kill_line();
-                }
-                let prev_mode = self.engine.state.mode;
-                self.engine.state.mode = Mode::Insert;
-                self.engine.plugin_manager.emit(PluginEvent::ModeChange {
-                    from: prev_mode,
-                    to: Mode::Insert,
-                });
-                self.needs_render = true;
+                let at = self.engine.state.cursor;
+                let marker = self.undo_marker();
+                self.delete_to_line_end('"', count);
+                self.defer_undo_since(marker);
+                self.enter_insert_at(at);
             }
             KeyCode::Char('S') => {
                 let count = self.take_count();
@@ -443,8 +436,18 @@ impl Editor {
                 }
                 KeyCode::Char('x') => {
                     let count = self.take_count();
-                    for _ in 0..count {
-                        self.delete_char('"');
+                    let line = self.engine.state.cursor.line;
+                    let col = self.engine.state.cursor.col;
+                    // Vim stops at the end of the line: `3x` on `abc` from the
+                    // last column deletes one character, not the line break.
+                    let end = (col + count).min(self.line_content_len(line));
+                    if end > col {
+                        self.delete_cols('"', col, end);
+                        self.engine.dot_last_action = Some(DotAction::Delete {
+                            text: String::new(),
+                            line: 0,
+                            col: 0,
+                        });
                     }
                     self.needs_render = true;
                 }
@@ -549,15 +552,16 @@ impl Editor {
                     };
                 }
                 KeyCode::Char('s') => {
-                    let _count = self.take_count();
-                    self.delete_char('"');
-                    let prev_mode = self.engine.state.mode;
-                    self.engine.state.mode = Mode::Insert;
-                    self.engine.plugin_manager.emit(PluginEvent::ModeChange {
-                        from: prev_mode,
-                        to: Mode::Insert,
-                    });
-                    self.needs_render = true;
+                    let count = self.take_count();
+                    let line = self.engine.state.cursor.line;
+                    let col = self.engine.state.cursor.col;
+                    let end = (col + count).min(self.line_content_len(line));
+                    let marker = self.undo_marker();
+                    if end > col {
+                        self.delete_cols('"', col, end);
+                    }
+                    self.defer_undo_since(marker);
+                    self.enter_insert_at(Position { line, col });
                 }
                 KeyCode::Char('~') => {
                     let count = self.take_count();

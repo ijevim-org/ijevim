@@ -169,8 +169,10 @@ impl Editor {
             } else {
                 None
             };
+            let marker = self.undo_marker();
             let edits = self.visual_delete_collect(register);
             self.push_undo_group(edits);
+            self.defer_undo_since(marker);
             self.enter_insert_after_change();
             self.block_insert = block;
         }
