@@ -12,8 +12,42 @@ pub enum ReviewSubMode {
     Preview,
     /// Writing a comment (mini-buffer style)
     CommentInput,
+    /// Browsing all annotations for the review
+    Annotations,
     /// Keybinding help
     Help,
+}
+
+/// A single row in the flattened diff view.
+///
+/// This is the shared navigation model used by both the keymap and the
+/// renderer so that "the current line" means the same thing everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffRowKind {
+    HunkHeader,
+    Add,
+    Delete,
+    Context,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffRow {
+    /// Index of the owning hunk in the current file.
+    pub hunk_index: usize,
+    /// Index of the owning line inside the hunk (`None` for hunk headers).
+    pub line_index: Option<usize>,
+    pub kind: DiffRowKind,
+    pub old_lineno: Option<usize>,
+    pub new_lineno: Option<usize>,
+    pub content: String,
+    pub staged: bool,
+}
+
+/// The line an in-progress comment will be attached to.
+#[derive(Debug, Clone)]
+pub struct CommentTarget {
+    pub file_path: String,
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +212,12 @@ pub struct ReviewState {
     pub selected_hunk: usize,
     /// Current sub-mode
     pub sub_mode: ReviewSubMode,
+    /// Selected row in the flattened diff view.
+    pub cursor_row: usize,
+    /// Selected annotation index in the annotation browser.
+    pub annotation_selected: usize,
+    /// Target of an in-progress comment.
+    pub comment_target: Option<CommentTarget>,
     /// User annotations
     pub annotations: Vec<Annotation>,
     /// Review comments
