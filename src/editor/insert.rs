@@ -103,17 +103,16 @@ impl Editor {
                     self.needs_render = true;
                     return;
                 }
-                // Push accumulated insert text as a single undo group
-                if !self.engine.insert_state.accum.is_empty() {
-                    let text = std::mem::take(&mut self.engine.insert_state.accum);
-                    let cursor_before = self
-                        .engine
-                        .insert_state
-                        .start_pos
-                        .unwrap_or(crate::types::Position { line: 1, col: 0 });
-                    self.engine.insert_state.start_pos = None;
-                    let mod_count = self.engine.buffer.modification_count();
-                    self.engine.undo_manager.push(crate::undo::Edit {
+                // Push the newline opened by `o`/`O` and the typed text as one
+                // change, in the order they were applied.
+                let text = std::mem::take(&mut self.engine.insert_state.accum);
+                let start_pos = self.engine.insert_state.start_pos.take();
+                let mut edits = std::mem::take(&mut self.engine.insert_state.pending_edits);
+                let mod_count = self.engine.buffer.modification_count();
+                if !text.is_empty() {
+                    let cursor_before =
+                        start_pos.unwrap_or(crate::types::Position { line: 1, col: 0 });
+                    edits.push(crate::undo::Edit {
                         edit_type: crate::undo::EditType::Insert {
                             line: cursor_before.line,
                             col: cursor_before.col,
@@ -124,7 +123,11 @@ impl Editor {
                         modification_count: mod_count,
                     });
                 }
-                self.engine.insert_state.start_pos = None;
+                match edits.len() {
+                    0 => {}
+                    1 => self.engine.undo_manager.push(edits.pop().unwrap()),
+                    _ => self.push_undo_group(edits),
+                }
                 self.transition_mode(Mode::Normal);
                 self.engine.state.cursor.col = self.engine.state.cursor.col.saturating_sub(1);
                 self.needs_render = true;

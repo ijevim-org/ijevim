@@ -1,6 +1,6 @@
 use crate::editor::Editor;
 use crate::types::DotAction;
-use crate::types::{Mode, PluginEvent};
+use crate::types::{Mode, PluginEvent, Position};
 use crate::undo::{Edit, EditType};
 use crossterm::event::KeyCode;
 
@@ -16,6 +16,32 @@ impl Editor {
             to: Mode::Insert,
         });
         self.needs_render = true;
+    }
+
+    /// Enter Insert mode at `pos`, which is where a charwise change starts.
+    ///
+    /// Unlike Normal mode, Insert mode may rest one column past the last
+    /// character (e.g. after `cw` at the end of a line).
+    /// Snapshot the undo position before a change's deletion.
+    pub(crate) fn undo_marker(&self) -> usize {
+        self.engine.undo_manager.current_index()
+    }
+
+    /// Move the deletion pushed since `marker` into the Insert-mode change, so
+    /// `u` reverts the delete and the typed text together.
+    pub(crate) fn defer_undo_since(&mut self, marker: usize) {
+        if self.engine.undo_manager.current_index() != marker {
+            if let Some(edit) = self.engine.undo_manager.pop_last() {
+                self.engine.insert_state.pending_edits.push(edit);
+            }
+        }
+    }
+
+    pub(crate) fn enter_insert_at(&mut self, pos: Position) {
+        let line = pos.line.clamp(1, self.engine.buffer.line_count().max(1));
+        let col = pos.col.min(self.line_content_len(line));
+        self.engine.state.cursor = Position { line, col };
+        self.enter_insert_after_change();
     }
 
     pub(super) async fn paste(&mut self, before: bool, count: usize) {
@@ -166,27 +192,15 @@ impl Editor {
         let mod_count = self.engine.buffer.modification_count();
 
         if col >= line_str.chars().count() {
-            if line < self.engine.buffer.line_count() {
-                // Merge with next line (EOL x behavior)
-                self.engine.buffer.merge_with_prev_line(line + 1);
-                self.engine.undo_manager.push(Edit {
-                    edit_type: EditType::Merge {
-                        line,
-                        deleted_newline_col: col,
-                    },
-                    cursor_before: self.engine.state.cursor,
-                    cursor_after: self.engine.state.cursor,
-                    modification_count: mod_count,
-                });
-                self.engine.dot_last_action = Some(DotAction::Delete {
-                    text: String::new(),
-                    line: 0,
-                    col: 0,
-                });
-            }
+            // `x` at the end of a line does not delete the line break; only
+            // `J`, `dd`, or `X` join lines.
         } else {
             let deleted_text: String = line_str[col..].chars().take(1).collect();
             self.engine.buffer.delete(line, col);
+            // Deleting the last character leaves the cursor one past the end;
+            // Normal mode keeps it on the new last character.
+            let max_col = self.engine.buffer.line_max_col(line);
+            self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
             self.engine.register.set(register, &deleted_text);
             self.engine.undo_manager.push(Edit {
                 edit_type: EditType::Delete {
@@ -267,15 +281,29 @@ impl Editor {
     }
     pub(crate) fn open_line(&mut self, above: bool) {
         let line = self.engine.state.cursor.line;
+        let cursor_before = self.engine.state.cursor;
+        let mod_count = self.engine.buffer.modification_count();
 
-        if above {
-            self.engine.buffer.insert(line, 0, "\n");
-            self.engine.state.cursor.line = line;
-        } else {
-            self.engine.buffer.insert(line + 1, 0, "\n");
-            self.engine.state.cursor.line = line + 1;
-        }
+        let insert_line = if above { line } else { line + 1 };
+        self.engine.buffer.insert(insert_line, 0, "\n");
+        self.engine.state.cursor.line = insert_line;
         self.engine.state.cursor.col = 0;
+
+        // The newline is part of the same change as the text typed next, so it
+        // is committed together at `Esc`. Without this, undo leaves the opened
+        // line (or removes text from the wrong place).
+        self.engine.insert_state.pending_edits.push(Edit {
+            edit_type: EditType::Insert {
+                line: insert_line,
+                col: 0,
+                text: "\n".to_string(),
+            },
+            cursor_before,
+            cursor_after: self.engine.state.cursor,
+            modification_count: mod_count,
+        });
+        self.engine.insert_state.accum.clear();
+        self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
 
         let prev_mode = self.engine.state.mode;
         self.engine.state.mode = Mode::Insert;

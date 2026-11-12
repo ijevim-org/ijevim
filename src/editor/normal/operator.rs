@@ -1,5 +1,5 @@
 use crate::editor::Editor;
-use crate::types::{Mode, Operator, PendingOperator, PluginEvent};
+use crate::types::{Mode, Operator, PendingOperator, PluginEvent, Position};
 use crossterm::event::KeyCode;
 
 impl Editor {
@@ -14,11 +14,19 @@ impl Editor {
         if self.engine.operator_state.pending_g {
             self.engine.operator_state.pending_g = false;
             if let KeyCode::Char('g') = key {
-                let line = self.engine.state.cursor.line;
+                let cursor_line = self.engine.state.cursor.line;
+                let target = count
+                    .max(1)
+                    .min(self.engine.buffer.content_line_count().max(1));
+                let (first, last) = if target <= cursor_line {
+                    (target, cursor_line)
+                } else {
+                    (cursor_line, target)
+                };
                 match op {
-                    Operator::Delete => self.delete_lines_range(register, 1, line),
-                    Operator::Yank => self.yank_lines_range(register, 1, line),
-                    Operator::Change => self.change_line_range(register, 1, line),
+                    Operator::Delete => self.delete_lines_range(register, first, last),
+                    Operator::Yank => self.yank_lines_range(register, first, last),
+                    Operator::Change => self.change_line_range(register, first, last),
                     _ => {}
                 }
             }
@@ -201,98 +209,118 @@ impl Editor {
                 }
                 _ => {}
             },
-            Operator::Change => match key {
-                KeyCode::Char('c') => {
-                    // `cc` clears the line but keeps one empty line.
-                    self.change_lines(register, count);
-                }
-                KeyCode::Char('w') => {
-                    self.change_word(register, count, false);
-                }
-                KeyCode::Char('W') => {
-                    self.change_word(register, count, true);
-                }
-                KeyCode::Char('e') => {
-                    self.delete_word_end(register, count, false);
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('l') | KeyCode::Char(' ') => {
-                    let col = self.engine.state.cursor.col;
-                    self.delete_cols(register, col, col + count.max(1));
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('h') => {
-                    let col = self.engine.state.cursor.col;
-                    self.delete_cols(register, col.saturating_sub(count.max(1)), col);
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('E') => {
-                    self.delete_word_end(register, count, true);
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('b') => {
-                    let from = self.word_backward_target(count, false);
-                    let to = (self.engine.state.cursor.line, self.engine.state.cursor.col);
-                    self.delete_span(register, from, to);
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('B') => {
-                    let from = self.word_backward_target(count, true);
-                    let to = (self.engine.state.cursor.line, self.engine.state.cursor.col);
-                    self.delete_span(register, from, to);
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('$') => {
-                    let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    self.delete_cols(register, col, self.line_content_len(line));
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('0') => {
-                    let col = self.engine.state.cursor.col;
-                    self.delete_cols(register, 0, col);
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('^') => {
-                    let line = self.engine.state.cursor.line;
-                    let col = self.engine.state.cursor.col;
-                    let start = self.first_non_blank_col(line);
-                    self.delete_cols(register, start, col);
-                    self.enter_insert_after_change();
-                }
-                KeyCode::Char('j') => {
-                    let line = self.engine.state.cursor.line;
-                    if line < self.engine.buffer.content_line_count() {
-                        self.change_line_range(register, line, line + count.max(1));
+            Operator::Change => {
+                let marker = self.undo_marker();
+                match key {
+                    KeyCode::Char('c') => {
+                        // `cc` clears the line but keeps one empty line.
+                        self.change_lines(register, count);
                     }
-                }
-                KeyCode::Char('k') => {
-                    let line = self.engine.state.cursor.line;
-                    if line > 1 {
-                        let start = line.saturating_sub(count.max(1)).max(1);
-                        self.change_line_range(register, start, line);
+                    KeyCode::Char('w') => {
+                        self.change_word(register, count, false);
                     }
+                    KeyCode::Char('W') => {
+                        self.change_word(register, count, true);
+                    }
+                    KeyCode::Char('e') => {
+                        let at = self.engine.state.cursor;
+                        self.delete_word_end(register, count, false);
+                        self.enter_insert_at(at);
+                    }
+                    KeyCode::Char('l') | KeyCode::Char(' ') => {
+                        let line = self.engine.state.cursor.line;
+                        let col = self.engine.state.cursor.col;
+                        self.delete_cols(register, col, col + count.max(1));
+                        self.enter_insert_at(Position { line, col });
+                    }
+                    KeyCode::Char('h') => {
+                        let line = self.engine.state.cursor.line;
+                        let col = self.engine.state.cursor.col;
+                        let start = col.saturating_sub(count.max(1));
+                        self.delete_cols(register, start, col);
+                        self.enter_insert_at(Position { line, col: start });
+                    }
+                    KeyCode::Char('E') => {
+                        let at = self.engine.state.cursor;
+                        self.delete_word_end(register, count, true);
+                        self.enter_insert_at(at);
+                    }
+                    KeyCode::Char('b') => {
+                        let from = self.word_backward_target(count, false);
+                        let to = (self.engine.state.cursor.line, self.engine.state.cursor.col);
+                        self.delete_span(register, from, to);
+                        self.enter_insert_at(Position {
+                            line: from.0,
+                            col: from.1,
+                        });
+                    }
+                    KeyCode::Char('B') => {
+                        let from = self.word_backward_target(count, true);
+                        let to = (self.engine.state.cursor.line, self.engine.state.cursor.col);
+                        self.delete_span(register, from, to);
+                        self.enter_insert_at(Position {
+                            line: from.0,
+                            col: from.1,
+                        });
+                    }
+                    KeyCode::Char('$') => {
+                        let line = self.engine.state.cursor.line;
+                        let col = self.engine.state.cursor.col;
+                        self.delete_cols(register, col, self.line_content_len(line));
+                        self.enter_insert_at(Position { line, col });
+                    }
+                    KeyCode::Char('0') => {
+                        let line = self.engine.state.cursor.line;
+                        let col = self.engine.state.cursor.col;
+                        self.delete_cols(register, 0, col);
+                        self.enter_insert_at(Position { line, col: 0 });
+                    }
+                    KeyCode::Char('^') => {
+                        let line = self.engine.state.cursor.line;
+                        let col = self.engine.state.cursor.col;
+                        let start = self.first_non_blank_col(line);
+                        self.delete_cols(register, start, col);
+                        self.enter_insert_at(Position { line, col: start });
+                    }
+                    KeyCode::Char('j') => {
+                        let line = self.engine.state.cursor.line;
+                        if line < self.engine.buffer.content_line_count() {
+                            self.change_line_range(register, line, line + count.max(1));
+                        }
+                    }
+                    KeyCode::Char('k') => {
+                        let line = self.engine.state.cursor.line;
+                        if line > 1 {
+                            let start = line.saturating_sub(count.max(1)).max(1);
+                            self.change_line_range(register, start, line);
+                        }
+                    }
+                    KeyCode::Char('G') => {
+                        let line = self.engine.state.cursor.line;
+                        self.change_line_range(
+                            register,
+                            line,
+                            self.engine.buffer.content_line_count(),
+                        );
+                    }
+                    KeyCode::Char('i') => {
+                        self.engine.operator_state.pending = PendingOperator::AwaitingTextObject {
+                            op: Operator::Change,
+                            register,
+                            inner: true,
+                        };
+                    }
+                    KeyCode::Char('a') => {
+                        self.engine.operator_state.pending = PendingOperator::AwaitingTextObject {
+                            op: Operator::Change,
+                            register,
+                            inner: false,
+                        };
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('G') => {
-                    let line = self.engine.state.cursor.line;
-                    self.change_line_range(register, line, self.engine.buffer.content_line_count());
-                }
-                KeyCode::Char('i') => {
-                    self.engine.operator_state.pending = PendingOperator::AwaitingTextObject {
-                        op: Operator::Change,
-                        register,
-                        inner: true,
-                    };
-                }
-                KeyCode::Char('a') => {
-                    self.engine.operator_state.pending = PendingOperator::AwaitingTextObject {
-                        op: Operator::Change,
-                        register,
-                        inner: false,
-                    };
-                }
-                _ => {}
-            },
+                self.defer_undo_since(marker);
+            }
             Operator::IndentRight => {
                 if let KeyCode::Char('>') = key {
                     let line = self.engine.state.cursor.line;
@@ -350,8 +378,11 @@ impl Editor {
             }
             Operator::Goto => {
                 if let KeyCode::Char('g') = key {
-                    self.engine.state.cursor.line = 1;
-                    self.engine.state.cursor.col = 0;
+                    let target = count
+                        .max(1)
+                        .min(self.engine.buffer.content_line_count().max(1));
+                    self.engine.state.cursor.line = target;
+                    self.engine.state.cursor.col = self.first_non_blank_col(target);
                     self.needs_render = true;
                 } else if let KeyCode::Char('e') = key {
                     for _ in 0..count {

@@ -82,7 +82,9 @@ impl Editor {
         // The delete path already selects the right range for every text
         // object (word/WORD/quotes/brackets) and records the undo entry, so
         // change is "delete the object, then insert".
+        let marker = self.undo_marker();
         self.handle_text_object(key, register, inner).await;
+        self.defer_undo_since(marker);
 
         let prev_mode = self.engine.state.mode;
         self.engine.state.mode = crate::types::Mode::Insert;
@@ -320,90 +322,98 @@ impl Editor {
 
     fn handle_bracket_text_object(&mut self, register: char, open: char, close: char, inner: bool) {
         let col = self.engine.state.cursor.col;
+        let cursor = (self.engine.state.cursor.line, col);
 
-        let mut open_pos: Option<usize> = None;
-        let mut open_line = self.engine.state.cursor.line;
-        for l in (1..=self.engine.state.cursor.line).rev() {
-            let l_chars: Vec<char> = self.engine.buffer.line_chars(l);
-            for i in (0..l_chars.len()).rev() {
-                if l == self.engine.state.cursor.line && i >= col {
-                    continue;
+        // Find the innermost matching pair that contains the cursor. Unlike a
+        // backwards scan, this also works when the cursor sits before the
+        // opening bracket (e.g. `di(` on `foo(bar)`).
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        let mut pair: Option<((usize, usize), (usize, usize))> = None;
+        for l in 1..=self.engine.buffer.line_count() {
+            for (i, &c) in self.engine.buffer.line_chars(l).iter().enumerate() {
+                if c == open {
+                    stack.push((l, i));
+                } else if c == close {
+                    if let Some(op) = stack.pop() {
+                        if op <= cursor
+                            && cursor <= (l, i)
+                            && pair.map_or(true, |(best, _)| op > best)
+                        {
+                            pair = Some((op, (l, i)));
+                        }
+                    }
                 }
-                if l_chars[i] == open {
-                    open_pos = Some(i);
-                    open_line = l;
-                    break;
-                }
-            }
-            if open_pos.is_some() {
-                break;
             }
         }
 
-        let mut close_pos: Option<usize> = None;
-        let mut close_line = self.engine.state.cursor.line;
-        for l in self.engine.state.cursor.line..=self.engine.buffer.line_count() {
-            let l_chars: Vec<char> = self.engine.buffer.line_chars(l);
-            for (i, &c) in l_chars.iter().enumerate() {
-                if l == self.engine.state.cursor.line && i <= col {
-                    continue;
+        // Not inside any pair: Vim searches forward on the cursor line for the
+        // next opening bracket and uses its match.
+        if pair.is_none() {
+            let chars = self.engine.buffer.line_chars(cursor.0);
+            if let Some(open_col) = (cursor.1..chars.len()).find(|&i| chars[i] == open) {
+                let mut depth = 0usize;
+                'outer: for l in cursor.0..=self.engine.buffer.line_count() {
+                    let chars = self.engine.buffer.line_chars(l);
+                    let from = if l == cursor.0 { open_col + 1 } else { 0 };
+                    for (i, &c) in chars.iter().enumerate().skip(from) {
+                        if c == open {
+                            depth += 1;
+                        } else if c == close {
+                            if depth == 0 {
+                                pair = Some(((cursor.0, open_col), (l, i)));
+                                break 'outer;
+                            }
+                            depth -= 1;
+                        }
+                    }
                 }
-                if c == close {
-                    close_pos = Some(i);
-                    close_line = l;
-                    break;
-                }
-            }
-            if close_pos.is_some() {
-                break;
             }
         }
+
+        let (open_line, open_pos) = match pair {
+            Some((op, _)) => (op.0, Some(op.1)),
+            None => (cursor.0, None),
+        };
+        let (close_line, close_pos) = match pair {
+            Some((_, cl)) => (cl.0, Some(cl.1)),
+            None => (cursor.0, None),
+        };
 
         if let Some(start) = open_pos {
             if let Some(end) = close_pos {
-                let (content_start, content_end) = if inner {
-                    (start + 1, end)
-                } else {
-                    (start, end + 1)
-                };
-
-                let start_char_idx = self.engine.buffer.line_to_char(open_line - 1) + content_start;
-                let end_char_idx = if close_line == open_line {
-                    start_char_idx + (content_end - content_start)
-                } else {
-                    self.engine.buffer.line_to_char(close_line - 1) + content_end
-                };
-
-                let mut content = String::new();
-                if open_line == close_line {
-                    let line_chars: Vec<char> = self.engine.buffer.line_chars(open_line);
-                    content = line_chars[content_start..content_end].iter().collect();
-                } else {
-                    let open_chars: Vec<char> = self.engine.buffer.line_chars(open_line);
-                    content.push_str(&open_chars[content_start..].iter().collect::<String>());
-                    content.push('\n');
-                    for l in (open_line + 1)..close_line {
-                        content.push_str(&self.engine.buffer.get_line(l));
-                        content.push('\n');
+                // Start just inside the opening bracket. When the bracket ends
+                // its line, the inner range begins on the next line, leaving
+                // the newline after `(` in place (as Vim does).
+                let (start_line, start_col) = if inner {
+                    if open_line == close_line || start + 1 < self.line_content_len(open_line) {
+                        (open_line, start + 1)
+                    } else {
+                        (open_line + 1, 0)
                     }
-                    let close_chars: Vec<char> = self.engine.buffer.line_chars(close_line);
-                    content.push_str(&close_chars[..content_end].iter().collect::<String>());
-                }
+                } else {
+                    (open_line, start)
+                };
+                let (end_line, end_col) = if inner {
+                    (close_line, end)
+                } else {
+                    (close_line, end + 1)
+                };
 
                 let mod_count = self.engine.buffer.modification_count();
-                self.engine.register.set(register, &content);
-                self.engine
+                let content = self
+                    .engine
                     .buffer
-                    .remove_range(start_char_idx, end_char_idx);
+                    .delete_range(start_line, start_col, end_line, end_col);
+                self.engine.register.set(register, &content);
 
-                // Position cursor at the start of the deleted range
-                self.engine.state.cursor.line = open_line;
-                self.engine.state.cursor.col = content_start;
+                self.engine.state.cursor.line = start_line;
+                self.engine.state.cursor.col =
+                    start_col.min(self.engine.buffer.line_max_col(start_line));
 
                 self.engine.undo_manager.push(Edit {
                     edit_type: EditType::Delete {
-                        line: open_line,
-                        col: content_start,
+                        line: start_line,
+                        col: start_col,
                         text: content,
                     },
                     cursor_before: self.engine.state.cursor,

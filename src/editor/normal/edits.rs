@@ -109,6 +109,7 @@ impl Editor {
         self.needs_render = true;
     }
     pub(crate) fn change_lines(&mut self, register: char, count: usize) {
+        let marker = self.undo_marker();
         let start = self.engine.state.cursor.line;
         let mut edits = Vec::new();
         for _ in 1..count.max(1) {
@@ -121,6 +122,7 @@ impl Editor {
             edits.push(edit);
         }
         self.push_undo_group(edits);
+        self.defer_undo_since(marker);
         self.engine.state.cursor.line = start.min(self.engine.buffer.line_count());
         self.engine.state.cursor.col = 0;
         self.enter_insert_after_change();
@@ -128,6 +130,7 @@ impl Editor {
 
     /// `cj` / `ck` / `cG`: delete whole lines, keep one empty line, insert.
     pub(crate) fn change_line_range(&mut self, register: char, first: usize, last: usize) {
+        let marker = self.undo_marker();
         let first = first.max(1);
         let last = last.max(first).min(self.engine.buffer.content_line_count());
         self.engine.state.cursor.line = first;
@@ -151,6 +154,7 @@ impl Editor {
             });
         }
         self.push_undo_group(edits);
+        self.defer_undo_since(marker);
         self.engine.state.cursor.line = first.min(self.engine.buffer.line_count());
         self.engine.state.cursor.col = 0;
         self.enter_insert_after_change();
@@ -315,11 +319,31 @@ impl Editor {
             .line_chars(line)
             .get(col)
             .map_or(true, |c| c.is_whitespace());
+        let marker = self.undo_marker();
         if on_blank {
             self.delete_word(register, count, big);
         } else {
             self.delete_word_end(register, count, big);
         }
-        self.enter_insert_after_change();
+        self.defer_undo_since(marker);
+        // Insert at the start of the deleted text, allowing the end-of-line
+        // column that Normal mode would clamp away.
+        self.enter_insert_at(crate::types::Position { line, col });
+    }
+
+    /// `D`: delete from the cursor to the end of the line, without removing the
+    /// line break. With a count, the span reaches the end of the count-th line.
+    pub(crate) fn delete_to_line_end(&mut self, register: char, count: usize) {
+        let line = self.engine.state.cursor.line;
+        let col = self.engine.state.cursor.col;
+        let count = count.max(1);
+        let last = (line + count - 1).min(self.engine.buffer.content_line_count().max(1));
+        // Vim makes a multi-line `D` linewise when it starts in column 0.
+        if col == 0 && count > 1 {
+            self.delete_lines_range(register, line, last);
+            return;
+        }
+        let end = self.line_content_len(last);
+        self.delete_span(register, (line, col), (last, end));
     }
 }
