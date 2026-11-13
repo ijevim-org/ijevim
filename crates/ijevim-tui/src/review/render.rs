@@ -4,7 +4,7 @@ use crate::review::state::{
 };
 use crate::screen::{CellStyle, ScreenBuffer};
 use crossterm::style::Color;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 // ── Colour palette for review mode ──────────────────────────────────
@@ -27,6 +27,8 @@ const HUNK_HEADER_FG: Color = Color::AnsiValue(33);
 const SELECTED_BG: Color = Color::AnsiValue(236);
 /// Visual line selection (multi-line comment range)
 const SELECTION_BG: Color = Color::AnsiValue(24);
+/// Diff search match background
+const SEARCH_BG: Color = Color::AnsiValue(58);
 /// Status bar background
 const STATUS_BG: Color = Color::AnsiValue(236);
 /// Mode indicator background (blue)
@@ -90,6 +92,23 @@ pub fn render_review(screen: &mut ScreenBuffer, review: &ReviewState, rows: usiz
             render_background(screen, review, &layout);
             render_comment_input(screen, review, layout.status_row, cols);
         }
+        ReviewSubMode::SearchInput | ReviewSubMode::FilterInput => {
+            render_background(screen, review, &layout);
+            let (title, hint) = if review.sub_mode == ReviewSubMode::SearchInput {
+                (" Search ", " Enter:search  C-u:clear  Esc:cancel ")
+            } else {
+                (" Filter files ", " Enter:apply  C-u:clear  Esc:cancel ")
+            };
+            render_prompt_input(
+                screen,
+                title,
+                &review.search_buffer,
+                review.search_cursor,
+                layout.status_row,
+                cols,
+                hint,
+            );
+        }
         ReviewSubMode::Annotations => {
             render_background(screen, review, &layout);
             render_annotations_overlay(screen, review, rows, cols);
@@ -126,7 +145,12 @@ fn render_file_list(screen: &mut ScreenBuffer, review: &ReviewState, rect: Panel
         ..CellStyle::default()
     };
 
-    for (i, ch) in " Files ".chars().enumerate() {
+    let title = if review.file_filter.is_empty() {
+        " Files ".to_string()
+    } else {
+        format!(" Files /{} ", review.file_filter)
+    };
+    for (i, ch) in title.chars().enumerate() {
         if i < rect.width() {
             screen.set_cell(rect.row_start, rect.col_start + i, ch, title_style);
         }
@@ -144,24 +168,27 @@ fn render_file_list(screen: &mut ScreenBuffer, review: &ReviewState, rect: Panel
         );
     }
 
-    if review.files.is_empty() {
+    let visible = review.filtered_file_indices();
+    if visible.is_empty() {
         let empty_row = rect.row_start + 2;
         let empty_style = CellStyle {
             fg: DIM_FG,
             ..CellStyle::default()
         };
-        set_string_styled(
-            screen,
-            empty_row,
-            rect.col_start,
-            " No changes to review ",
-            empty_style,
-        );
+        let (empty_text, hint_text) = if review.files.is_empty() {
+            (
+                " No changes to review ",
+                " :review --staged for staged changes ",
+            )
+        } else {
+            (" No matching files ", " Esc clears the filter ")
+        };
+        set_string_styled(screen, empty_row, rect.col_start, empty_text, empty_style);
         set_string_styled(
             screen,
             empty_row + 1,
             rect.col_start,
-            " :review --staged for staged changes ",
+            hint_text,
             CellStyle {
                 fg: Color::AnsiValue(240),
                 ..CellStyle::default()
@@ -171,10 +198,16 @@ fn render_file_list(screen: &mut ScreenBuffer, review: &ReviewState, rect: Panel
     }
 
     let max_visible = rect.height().saturating_sub(3);
-    for i in 0..review.files.len().min(max_visible) {
+    let scroll = visible
+        .iter()
+        .position(|&idx| idx == review.selected_file)
+        .unwrap_or(0)
+        .saturating_sub(max_visible.saturating_sub(1));
+    for i in 0..visible.len().min(max_visible) {
         let row = rect.row_start + 2 + i;
-        let file = &review.files[i];
-        let is_selected = i == review.selected_file;
+        let file_index = visible[scroll + i];
+        let file = &review.files[file_index];
+        let is_selected = file_index == review.selected_file;
 
         if is_selected {
             for c in rect.col_start..rect.col_end {
@@ -231,7 +264,12 @@ fn render_file_list(screen: &mut ScreenBuffer, review: &ReviewState, rect: Panel
     }
 
     let count_row = rect.row_end.saturating_sub(1);
-    let count_text = format!(" {}/{} ", review.selected_file + 1, review.files.len());
+    let position = visible
+        .iter()
+        .position(|&idx| idx == review.selected_file)
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let count_text = format!(" {}/{} ", position, visible.len());
     set_string_styled(
         screen,
         count_row,
@@ -314,6 +352,7 @@ fn render_unified_diff(
     }
 
     let counts = annotation_counts(review, file.display_path());
+    let matches: HashSet<usize> = review.search_matches().into_iter().collect();
     let lineno_width = line_number_width(&rows);
     let max_visible = rect.height().saturating_sub(2);
     let scroll = effective_scroll(review, rows.len(), max_visible);
@@ -331,6 +370,7 @@ fn render_unified_diff(
             dl,
             idx == review.cursor_row,
             review.is_row_selected(idx),
+            matches.contains(&idx),
             lineno_width,
             counts
                 .get(&dl.comment_line().unwrap_or(0))
@@ -348,6 +388,7 @@ fn render_unified_row(
     dl: &DiffRow,
     is_cursor: bool,
     is_selected: bool,
+    is_match: bool,
     lineno_width: usize,
     annotation_count: usize,
 ) {
@@ -365,6 +406,8 @@ fn render_unified_row(
                 },
                 bg: if is_cursor {
                     SELECTED_BG
+                } else if is_match {
+                    SEARCH_BG
                 } else if is_selected {
                     SELECTION_BG
                 } else {
@@ -391,6 +434,8 @@ fn render_unified_row(
             };
             let bg = if is_cursor {
                 sel_bg
+            } else if is_match {
+                SEARCH_BG
             } else if is_selected {
                 SELECTION_BG
             } else {
@@ -524,6 +569,7 @@ fn render_side_by_side_diff(
 
     let rows = review.rows_for(review.selected_file);
     let counts = annotation_counts(review, file.display_path());
+    let matches: HashSet<usize> = review.search_matches().into_iter().collect();
     let lineno_width = (line_number_width(&rows) / 2).max(3);
     let max_visible = rect.height().saturating_sub(1);
     let scroll = effective_scroll(review, rows.len(), max_visible);
@@ -536,6 +582,7 @@ fn render_side_by_side_diff(
         let row = rect.row_start + 1 + i;
         let is_cursor = idx == review.cursor_row;
         let is_selected = review.is_row_selected(idx);
+        let is_match = matches.contains(&idx);
         let count = counts
             .get(&dl.comment_line().unwrap_or(0))
             .copied()
@@ -560,6 +607,7 @@ fn render_side_by_side_diff(
                     &left,
                     is_cursor,
                     is_selected,
+                    is_match,
                     count,
                 );
                 render_side_header(
@@ -569,6 +617,7 @@ fn render_side_by_side_diff(
                     &right,
                     is_cursor,
                     is_selected,
+                    is_match,
                     count,
                 );
             }
@@ -580,6 +629,7 @@ fn render_side_by_side_diff(
                     Color::Reset,
                     is_cursor,
                     is_selected,
+                    is_match,
                     false,
                 );
                 render_side_content(
@@ -593,6 +643,7 @@ fn render_side_by_side_diff(
                     ADD_FG,
                     is_cursor,
                     is_selected,
+                    is_match,
                     lineno_width,
                     count,
                     true,
@@ -610,6 +661,7 @@ fn render_side_by_side_diff(
                     DEL_FG,
                     is_cursor,
                     is_selected,
+                    is_match,
                     lineno_width,
                     count,
                     false,
@@ -621,6 +673,7 @@ fn render_side_by_side_diff(
                     Color::Reset,
                     is_cursor,
                     is_selected,
+                    is_match,
                     true,
                 );
             }
@@ -636,6 +689,7 @@ fn render_side_by_side_diff(
                     Color::Reset,
                     is_cursor,
                     is_selected,
+                    is_match,
                     lineno_width,
                     count,
                     false,
@@ -651,6 +705,7 @@ fn render_side_by_side_diff(
                     Color::Reset,
                     is_cursor,
                     is_selected,
+                    is_match,
                     lineno_width,
                     count,
                     true,
@@ -672,12 +727,15 @@ fn render_side_content(
     prefix_fg: Color,
     is_cursor: bool,
     is_selected: bool,
+    is_match: bool,
     lineno_width: usize,
     annotation_count: usize,
     new_side: bool,
 ) {
     let bg = if is_cursor {
         sel_bg
+    } else if is_match {
+        SEARCH_BG
     } else if is_selected {
         SELECTION_BG
     } else {
@@ -760,6 +818,7 @@ fn render_side_content(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_side_header(
     screen: &mut ScreenBuffer,
     row: usize,
@@ -767,6 +826,7 @@ fn render_side_header(
     text: &str,
     is_cursor: bool,
     is_selected: bool,
+    is_match: bool,
     annotation_count: usize,
 ) {
     let style = CellStyle {
@@ -777,6 +837,8 @@ fn render_side_header(
         },
         bg: if is_cursor {
             SELECTED_BG
+        } else if is_match {
+            SEARCH_BG
         } else if is_selected {
             SELECTION_BG
         } else {
@@ -796,6 +858,7 @@ fn render_side_header(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_side_blank(
     screen: &mut ScreenBuffer,
     row: usize,
@@ -803,10 +866,13 @@ fn render_side_blank(
     bg: Color,
     is_cursor: bool,
     is_selected: bool,
+    is_match: bool,
     show_gutter: bool,
 ) {
     let bg = if is_cursor {
         SELECTED_BG
+    } else if is_match {
+        SEARCH_BG
     } else if is_selected {
         SELECTION_BG
     } else {
@@ -916,6 +982,7 @@ fn render_help_overlay(screen: &mut ScreenBuffer, rows: usize, cols: usize) {
         " ║                                              ║ ",
         " ║  File List:                                  ║ ",
         " ║    j/k    Navigate files                     ║ ",
+        " ║    /      Filter files                       ║ ",
         " ║    Enter  Open diff view                     ║ ",
         " ║    a      Browse annotations                 ║ ",
         " ║                                              ║ ",
@@ -924,6 +991,8 @@ fn render_help_overlay(screen: &mut ScreenBuffer, rows: usize, cols: usize) {
         " ║    C-d/u  Half page down/up                  ║ ",
         " ║    g/G    First/last row                     ║ ",
         " ║    [/]    Previous/next hunk                 ║ ",
+        " ║    /      Search diff                        ║ ",
+        " ║    n/N    Next/previous match                ║ ",
         " ║    n/p    Next/previous annotation           ║ ",
         " ║    Enter  Toggle hunk stage (git apply)      ║ ",
         " ║    S      Stage file                         ║ ",
@@ -1001,6 +1070,97 @@ fn render_help_overlay(screen: &mut ScreenBuffer, rows: usize, cols: usize) {
             );
         }
     }
+}
+
+// ── Search / filter prompt overlay ──────────────────────────────────
+
+fn render_prompt_input(
+    screen: &mut ScreenBuffer,
+    title: &str,
+    buffer: &str,
+    cursor: usize,
+    status_row: usize,
+    cols: usize,
+    hint: &str,
+) {
+    let box_width = cols.saturating_sub(4).clamp(24, 76);
+    let start_col = (cols.saturating_sub(box_width)) / 2;
+    let start_row = status_row.saturating_sub(3);
+
+    for r in start_row..status_row {
+        for c in start_col..(start_col + box_width).min(cols) {
+            screen.set_cell(
+                r,
+                c,
+                ' ',
+                CellStyle {
+                    bg: COMMENT_BG,
+                    ..CellStyle::default()
+                },
+            );
+        }
+    }
+
+    set_string_styled(
+        screen,
+        start_row,
+        start_col,
+        &truncate(title, box_width),
+        CellStyle {
+            fg: Color::AnsiValue(11),
+            bg: COMMENT_BG,
+            bold: true,
+            ..CellStyle::default()
+        },
+    );
+
+    let max_chars = box_width.saturating_sub(2);
+    let cursor = cursor.min(buffer.len());
+    let cursor_char = buffer[..cursor].chars().count();
+    let start_char = cursor_char.saturating_sub(max_chars.saturating_sub(1));
+    let display: String = buffer.chars().skip(start_char).take(max_chars).collect();
+    set_string_styled(
+        screen,
+        start_row + 1,
+        start_col + 1,
+        &display,
+        CellStyle {
+            fg: Color::White,
+            bg: COMMENT_BG,
+            ..CellStyle::default()
+        },
+    );
+
+    let cursor_col = start_col + 1 + cursor_char.saturating_sub(start_char);
+    if cursor_col < cols {
+        let ch = display
+            .chars()
+            .nth(cursor_char.saturating_sub(start_char))
+            .unwrap_or(' ');
+        screen.set_cell(
+            start_row + 1,
+            cursor_col,
+            ch,
+            CellStyle {
+                fg: Color::Black,
+                bg: Color::AnsiValue(11),
+                ..CellStyle::default()
+            },
+        );
+    }
+
+    set_string_styled(
+        screen,
+        start_row + 2,
+        start_col + 1,
+        &truncate(hint, box_width.saturating_sub(2)),
+        CellStyle {
+            fg: DIM_FG,
+            bg: COMMENT_BG,
+            italic: true,
+            ..CellStyle::default()
+        },
+    );
 }
 
 // ── Comment input overlay ───────────────────────────────────────────
@@ -1289,6 +1449,8 @@ fn render_status_bar(screen: &mut ScreenBuffer, review: &ReviewState, row: usize
         ReviewSubMode::Preview => " [preview] ",
         ReviewSubMode::CommentInput => " [comment] ",
         ReviewSubMode::Annotations => " [annots] ",
+        ReviewSubMode::SearchInput => " [search] ",
+        ReviewSubMode::FilterInput => " [filter] ",
         ReviewSubMode::Help => " [help] ",
     };
     let sub_mode_style = CellStyle {
@@ -1313,9 +1475,18 @@ fn render_status_bar(screen: &mut ScreenBuffer, review: &ReviewState, row: usize
     } else {
         String::new()
     };
+    let search_text = if review.search_query.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  /{} ({})",
+            review.search_query,
+            review.search_matches().len()
+        )
+    };
     let info_text = format!(
-        "{}{}  |  {} changes  |  {}",
-        file_name, ann_text, changes, review.args,
+        "{}{}{}  |  {} changes  |  {}",
+        file_name, ann_text, search_text, changes, review.args,
     );
     let info_start = sub_mode_start + sub_mode_text.len();
     for (i, ch) in info_text.chars().enumerate() {
@@ -1535,6 +1706,10 @@ mod tests {
             pending_discard: None,
             comment_target: None,
             comment_anchor: None,
+            search_query: String::new(),
+            search_buffer: String::new(),
+            search_cursor: 0,
+            file_filter: String::new(),
             annotations: Vec::new(),
             comments: Vec::new(),
             scroll: crate::review::ScrollState::default(),
@@ -1573,6 +1748,39 @@ mod tests {
             screen.render()
         );
         assert_eq!(review.selection_lines(), Some((1, 2)));
+    }
+
+    #[test]
+    fn file_filter_hides_non_matching_files() {
+        let mut review = sample_review();
+        let mut other = review.files[0].clone();
+        other.old_path = "src/lib.rs".to_string();
+        other.new_path = "src/lib.rs".to_string();
+        review.files.push(other);
+        review.file_filter = "main".to_string();
+
+        let mut screen = ScreenBuffer::new(12, 80);
+        render_review(&mut screen, &review, 12, 80);
+        let text = screen.render();
+
+        assert!(text.contains("src/main.rs"));
+        assert!(!text.contains("src/lib.rs"));
+        assert_eq!(review.filtered_file_indices(), vec![0]);
+    }
+
+    #[test]
+    fn search_query_and_match_count_are_visible() {
+        let mut review = sample_review();
+        review.search_query = "added".to_string();
+
+        let mut screen = ScreenBuffer::new(12, 80);
+        render_review(&mut screen, &review, 12, 80);
+
+        assert!(
+            screen.render().contains("/added (1)"),
+            "search indicator missing: {}",
+            screen.render()
+        );
     }
 
     #[test]

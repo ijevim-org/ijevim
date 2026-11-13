@@ -14,6 +14,10 @@ pub enum ReviewSubMode {
     CommentInput,
     /// Browsing all annotations for the review
     Annotations,
+    /// Typing a diff search pattern
+    SearchInput,
+    /// Typing a file-list filter
+    FilterInput,
     /// Keybinding help
     Help,
 }
@@ -151,6 +155,15 @@ pub struct Annotation {
     pub created_at: String,
 }
 
+/// Smart-case substring match used by review search.
+fn row_matches(content: &str, query: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        content.to_lowercase().contains(&query.to_lowercase())
+    } else {
+        content.contains(query)
+    }
+}
+
 impl Annotation {
     /// Last line covered by this annotation.
     pub fn last_line(&self) -> usize {
@@ -263,6 +276,14 @@ pub struct ReviewState {
     pub comment_target: Option<CommentTarget>,
     /// Row where visual line selection started (DiffView).
     pub comment_anchor: Option<usize>,
+    /// Active diff search pattern (`n` / `N`).
+    pub search_query: String,
+    /// Buffer for the search / filter prompt.
+    pub search_buffer: String,
+    /// Cursor position inside `search_buffer`.
+    pub search_cursor: usize,
+    /// Active file-list filter (case-insensitive substring of the path).
+    pub file_filter: String,
     /// User annotations
     pub annotations: Vec<Annotation>,
     /// Review comments
@@ -436,6 +457,74 @@ impl ReviewState {
             self.scroll.scroll_top = cursor;
         } else if cursor >= self.scroll.scroll_top.saturating_add(visible) {
             self.scroll.scroll_top = cursor + 1 - visible;
+        }
+    }
+
+    // ── Search / filtering ──────────────────────────────────────────
+
+    /// Row indices in the current file matching the active search query.
+    ///
+    /// Uses smart case: an all-lowercase query is case-insensitive, otherwise
+    /// the search is case-sensitive.
+    pub fn search_matches(&self) -> Vec<usize> {
+        if self.search_query.is_empty() {
+            return Vec::new();
+        }
+        let insensitive = !self.search_query.chars().any(|ch| ch.is_uppercase());
+        self.current_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row_matches(&row.content, &self.search_query, insensitive))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Jump to the next/previous search match, wrapping around.
+    pub fn jump_search(&mut self, forward: bool) -> bool {
+        let matches = self.search_matches();
+        if matches.is_empty() {
+            return false;
+        }
+        let target = if forward {
+            matches
+                .iter()
+                .copied()
+                .find(|&row| row > self.cursor_row)
+                .unwrap_or(matches[0])
+        } else {
+            matches
+                .iter()
+                .copied()
+                .rev()
+                .find(|&row| row < self.cursor_row)
+                .unwrap_or(*matches.last().unwrap())
+        };
+        self.set_cursor_row(target);
+        true
+    }
+
+    /// File indices visible under the active filter.
+    pub fn filtered_file_indices(&self) -> Vec<usize> {
+        if self.file_filter.is_empty() {
+            return (0..self.files.len()).collect();
+        }
+        let needle = self.file_filter.to_lowercase();
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.display_path().to_lowercase().contains(&needle))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Select the first visible file if the current selection is filtered out.
+    pub fn ensure_selected_file_visible(&mut self) {
+        let visible = self.filtered_file_indices();
+        if visible.is_empty() {
+            return;
+        }
+        if !visible.contains(&self.selected_file) {
+            self.select_file(visible[0]);
         }
     }
 

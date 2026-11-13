@@ -42,6 +42,10 @@ pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
         pending_discard: None,
         comment_target: None,
         comment_anchor: None,
+        search_query: String::new(),
+        search_buffer: String::new(),
+        search_cursor: 0,
+        file_filter: String::new(),
         annotations,
         comments: Vec::new(),
         scroll: crate::review::ScrollState::default(),
@@ -96,6 +100,7 @@ pub fn reload(state: &mut ReviewState) -> Result<(), String> {
         .or_else(|| crate::review::rows::first_row_of_hunk(&rows, old_hunk))
         .unwrap_or_else(|| old_cursor.min(rows.len().saturating_sub(1)));
     state.set_cursor_row(target);
+    state.ensure_selected_file_visible();
     Ok(())
 }
 

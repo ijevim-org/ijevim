@@ -37,7 +37,12 @@ impl KeymapHandler for ReviewKeymap {
             // `q` exits review, except while typing a comment where it is text.
             if key == KeyCode::Char('q')
                 && modifiers.is_empty()
-                && sub_mode != ReviewSubMode::CommentInput
+                && !matches!(
+                    sub_mode,
+                    ReviewSubMode::CommentInput
+                        | ReviewSubMode::SearchInput
+                        | ReviewSubMode::FilterInput
+                )
             {
                 editor.exit_review_mode();
                 return;
@@ -53,6 +58,12 @@ impl KeymapHandler for ReviewKeymap {
                 ReviewSubMode::DiffView => handle_diff_view(editor, key, modifiers),
                 ReviewSubMode::Preview => handle_preview(editor, key, modifiers),
                 ReviewSubMode::CommentInput => handle_comment_input(editor, key, modifiers),
+                ReviewSubMode::SearchInput => {
+                    handle_prompt_input(editor, key, modifiers, PromptKind::Search)
+                }
+                ReviewSubMode::FilterInput => {
+                    handle_prompt_input(editor, key, modifiers, PromptKind::Filter)
+                }
                 ReviewSubMode::Annotations => handle_annotations(editor, key, modifiers),
                 ReviewSubMode::Help => {
                     if let Some(state) = &mut editor.engine.review_state {
@@ -72,8 +83,12 @@ fn handle_escape(editor: &mut Editor, sub_mode: ReviewSubMode) {
 
     match sub_mode {
         ReviewSubMode::FileList => {
-            editor.exit_review_mode();
-            return;
+            if state.file_filter.is_empty() {
+                editor.exit_review_mode();
+                return;
+            }
+            state.file_filter.clear();
+            state.ensure_selected_file_visible();
         }
         ReviewSubMode::Help => {
             state.sub_mode = ReviewSubMode::FileList;
@@ -81,6 +96,8 @@ fn handle_escape(editor: &mut Editor, sub_mode: ReviewSubMode) {
         ReviewSubMode::DiffView => {
             if state.comment_anchor.is_some() {
                 state.clear_comment_selection();
+            } else if !state.search_query.is_empty() {
+                state.search_query.clear();
             } else {
                 state.sub_mode = ReviewSubMode::FileList;
             }
@@ -95,6 +112,16 @@ fn handle_escape(editor: &mut Editor, sub_mode: ReviewSubMode) {
             state.clear_comment_selection();
             state.sub_mode = ReviewSubMode::DiffView;
         }
+        ReviewSubMode::SearchInput => {
+            state.search_buffer.clear();
+            state.search_cursor = 0;
+            state.sub_mode = ReviewSubMode::DiffView;
+        }
+        ReviewSubMode::FilterInput => {
+            state.search_buffer.clear();
+            state.search_cursor = 0;
+            state.sub_mode = ReviewSubMode::FileList;
+        }
     }
     editor.needs_render = true;
 }
@@ -108,13 +135,29 @@ fn handle_file_list(editor: &mut Editor, key: KeyCode, _modifiers: KeyModifiers)
 
     match key {
         KeyCode::Char('j') | KeyCode::Down => {
-            state.select_file(state.selected_file + 1);
+            let visible = state.filtered_file_indices();
+            if let Some(pos) = visible.iter().position(|&idx| idx == state.selected_file) {
+                if let Some(&next) = visible.get(pos + 1) {
+                    state.select_file(next);
+                }
+            } else if let Some(&first) = visible.first() {
+                state.select_file(first);
+            }
             editor.needs_render = true;
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            if state.selected_file > 0 {
-                state.select_file(state.selected_file - 1);
+            let visible = state.filtered_file_indices();
+            if let Some(pos) = visible.iter().position(|&idx| idx == state.selected_file) {
+                if let Some(&prev) = pos.checked_sub(1).and_then(|p| visible.get(p)) {
+                    state.select_file(prev);
+                }
             }
+            editor.needs_render = true;
+        }
+        KeyCode::Char('/') => {
+            state.search_buffer = state.file_filter.clone();
+            state.search_cursor = state.search_buffer.len();
+            state.sub_mode = ReviewSubMode::FilterInput;
             editor.needs_render = true;
         }
         KeyCode::Enter => {
@@ -177,7 +220,26 @@ fn handle_diff_view(editor: &mut Editor, key: KeyCode, modifiers: KeyModifiers) 
         }
         KeyCode::Char(']') | KeyCode::Char(')') => state.jump_hunk(true),
         KeyCode::Char('[') | KeyCode::Char('(') => state.jump_hunk(false),
-        KeyCode::Char('n') => jump_annotation(editor, true),
+        KeyCode::Char('/') => {
+            state.search_buffer = state.search_query.clone();
+            state.search_cursor = state.search_buffer.len();
+            state.clear_comment_selection();
+            state.sub_mode = ReviewSubMode::SearchInput;
+        }
+        KeyCode::Char('n') => {
+            if state.search_query.is_empty() {
+                jump_annotation(editor, true);
+            } else {
+                state.jump_search(true);
+            }
+        }
+        KeyCode::Char('N') => {
+            if state.search_query.is_empty() {
+                jump_annotation(editor, false);
+            } else {
+                state.jump_search(false);
+            }
+        }
         KeyCode::Char('p') => jump_annotation(editor, false),
         KeyCode::Enter => {
             toggle_stage(editor);
@@ -568,6 +630,117 @@ fn handle_annotations(editor: &mut Editor, key: KeyCode, _modifiers: KeyModifier
             state.annotation_pending_delete = false;
         }
     }
+}
+
+// ── Search / filter prompt ──────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+enum PromptKind {
+    Search,
+    Filter,
+}
+
+fn handle_prompt_input(
+    editor: &mut Editor,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+    kind: PromptKind,
+) {
+    let message = {
+        let Some(state) = &mut editor.engine.review_state else {
+            return;
+        };
+
+        match key {
+            KeyCode::Esc => {
+                state.search_buffer.clear();
+                state.search_cursor = 0;
+                state.sub_mode = match kind {
+                    PromptKind::Search => ReviewSubMode::DiffView,
+                    PromptKind::Filter => ReviewSubMode::FileList,
+                };
+                editor.needs_render = true;
+                return;
+            }
+            KeyCode::Enter => {
+                let text = state.search_buffer.trim().to_string();
+                match kind {
+                    PromptKind::Search => {
+                        state.search_query = text;
+                        state.sub_mode = ReviewSubMode::DiffView;
+                        if !state.search_query.is_empty() && !state.jump_search(true) {
+                            Some("review: no matches".to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    PromptKind::Filter => {
+                        state.file_filter = text;
+                        state.sub_mode = ReviewSubMode::FileList;
+                        state.ensure_selected_file_visible();
+                        if state.filtered_file_indices().is_empty() {
+                            Some("review: no matching files".to_string())
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                state.search_buffer.clear();
+                state.search_cursor = 0;
+                None
+            }
+            KeyCode::Backspace => {
+                if state.search_cursor > 0 {
+                    let prev = prev_char_boundary(&state.search_buffer, state.search_cursor);
+                    state
+                        .search_buffer
+                        .replace_range(prev..state.search_cursor, "");
+                    state.search_cursor = prev;
+                }
+                None
+            }
+            KeyCode::Delete => {
+                if state.search_cursor < state.search_buffer.len() {
+                    let next = next_char_boundary(&state.search_buffer, state.search_cursor);
+                    state
+                        .search_buffer
+                        .replace_range(state.search_cursor..next, "");
+                }
+                None
+            }
+            KeyCode::Left => {
+                state.search_cursor = prev_char_boundary(&state.search_buffer, state.search_cursor);
+                None
+            }
+            KeyCode::Right => {
+                state.search_cursor = next_char_boundary(&state.search_buffer, state.search_cursor);
+                None
+            }
+            KeyCode::Home => {
+                state.search_cursor = 0;
+                None
+            }
+            KeyCode::End => {
+                state.search_cursor = state.search_buffer.len();
+                None
+            }
+            KeyCode::Char(ch)
+                if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                state.search_buffer.insert(state.search_cursor, ch);
+                state.search_cursor += ch.len_utf8();
+                None
+            }
+            _ => None,
+        }
+    };
+
+    if let Some(message) = message {
+        editor.engine.state.set_message(message);
+    }
+    editor.needs_render = true;
 }
 
 // ── Comment Input sub-mode ───────────────────────────────────────────
