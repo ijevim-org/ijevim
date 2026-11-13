@@ -145,9 +145,8 @@ impl WindowLayout {
         // Floor-scaled boundaries keep adjacent windows exactly contiguous:
         // `end(i) == start(i + 1)` stays true because both map through the
         // same monotonic function. `old` is non-zero here (checked above).
-        let scale = |v: usize, old: NonZeroUsize, new: usize| -> usize {
-            v.saturating_mul(new) / old.get()
-        };
+        let scale =
+            |v: usize, old: NonZeroUsize, new: usize| -> usize { v.saturating_mul(new) / old };
         let old_rows = NonZeroUsize::new(old_rows).expect("checked above");
         let old_cols = NonZeroUsize::new(old_cols).expect("checked above");
         for w in &mut self.windows {
@@ -665,6 +664,8 @@ pub enum ConfirmAction {
     QuitDiscard,
     WriteQuitAll,
     ReloadDiscard,
+    /// Discard the review-mode file awaiting confirmation.
+    ReviewDiscard,
 }
 
 #[derive(Clone, Debug)]

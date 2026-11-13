@@ -10,6 +10,8 @@ A minimal Vim-like TUI editor written in Rust.
 - Undo/Redo
 - Syntax highlighting (syntect)
 - Multi-language plugin support (Lua, Lisp, JavaScript, Rust, Nix)
+- Review mode: git diff browsing, hunk/file staging, multi-line comments,
+  search and file filtering
 
 ## CLI usage examples
 
@@ -24,10 +26,42 @@ ijevim emacs
 ijevim <file>
 ```
 
+## Review mode
+
+Start review mode from the Ex command line inside a Git repository:
+
+```vim
+:review              " diff against HEAD (staged + unstaged)
+:review --staged     " staged changes only
+:review <rev>        " diff against a revision
+:review <rev1>..<rev2>
+:review -- <path>    " limit to a path
+```
+
+In the file list, `j`/`k` move, `Enter` opens the diff, `/` filters by path,
+`a` opens the annotation browser, and `d` toggles unified/side-by-side.
+In the diff view:
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `Ctrl-d` / `Ctrl-u`, `g` / `G` | move |
+| `]` / `[` | next / previous hunk |
+| `Enter` | stage or unstage the hunk under the cursor |
+| `S` / `U` | stage / unstage the whole file |
+| `X` | discard the file's changes (confirmation required) |
+| `v` then `c` | comment on a visual line selection |
+| `/`, `n` / `N` | search, next / previous match |
+| `r` | reload the diff |
+
+Annotations are stored in `<git-dir>/ijevim/review/annotations.json`, so they do
+not dirty the worktree. See the [review mode guide](https://ijevim-org.github.io/review)
+for the full keymap and limitations.
+
 ## Documentation
 
 - [Documentation site](https://ijevim-org.github.io/)
 - [Keybinding specification](https://ijevim-org.github.io/keybindings)
+- [Review mode](https://ijevim-org.github.io/review)
 
 ## Install
 

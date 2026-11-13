@@ -1,29 +1,34 @@
 //! Git diff integration for Review Mode.
 //!
-//! This module handles running `git diff` and parsing unified diff output
-//! into structured [`DiffFile`] / [`Hunk`] / [`DiffLine`] data.
+//! This module runs `git diff`, parses unified diff output into structured
+//! [`DiffFile`] / [`Hunk`] / [`DiffLine`] data, and stages/unstages patches.
+//!
+//! All git invocations take an explicit repository root (`git -C <root>`), so
+//! review mode never depends on the process working directory.
 
+use crate::review::annotations;
 use crate::review::state::{
     DiffFile, DiffLine, DiffLineKind, FileStatus, Hunk, ReviewArgs, ReviewState,
 };
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+/// Options applied to every diff invocation so parsing is prefix-stable.
+const DIFF_OPTIONS: [&str; 4] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
 
 // ── Public API ──────────────────────────────────────────────────────
 
-/// Try to enter review mode with real `git diff` data.
-///
-/// Returns `Some(ReviewState)` on success, `None` if not in a git
-/// repository or if `git diff` fails. The caller should fall back to
-/// mock data when this returns `None`.
-/// Build the review state from the real `git diff`.
-///
-/// Returns the reason on failure instead of an `Option`, so the caller can
-/// report it. A silent fallback to fabricated data makes the review screen
-/// look like it is showing the user's actual changes.
+/// Build review state from the real `git diff`.
 pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
     let project_root =
         ijevim_core::git::find_root().ok_or_else(|| "not inside a git repository".to_string())?;
-    let diff_output = run_git_diff(args)?;
-    let files = parse_unified_diff(&diff_output);
+    let files = load_diff(args, &project_root)?;
+    let annotations = annotations::load_annotations(&project_root);
 
     Ok(ReviewState {
         args: args.clone(),
@@ -31,9 +36,20 @@ pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
         selected_file: 0,
         selected_hunk: 0,
         sub_mode: crate::review::ReviewSubMode::FileList,
-        annotations: Vec::new(),
+        cursor_row: 0,
+        annotation_selected: 0,
+        annotation_pending_delete: false,
+        pending_discard: None,
+        comment_target: None,
+        comment_anchor: None,
+        search_query: String::new(),
+        search_buffer: String::new(),
+        search_cursor: 0,
+        file_filter: String::new(),
+        annotations,
         comments: Vec::new(),
         scroll: crate::review::ScrollState::default(),
+        viewport_height: 20,
         diff_style: crate::review::DiffStyle::Unified,
         file_list_width: 30,
         project_root: Some(project_root),
@@ -42,180 +58,282 @@ pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
     })
 }
 
-// ── Running git diff ────────────────────────────────────────────────
+/// Reload the diff from git, preserving file / line selection as far as
+/// possible.
+pub fn reload(state: &mut ReviewState) -> Result<(), String> {
+    let Some(root) = state.project_root.clone() else {
+        return Err("not inside a git repository".to_string());
+    };
 
-fn run_git_diff(args: &ReviewArgs) -> Result<String, String> {
+    let old_path = state.current_file().map(|f| f.display_path().to_string());
+    let old_hunk = state
+        .current_row()
+        .map(|row| row.hunk_index)
+        .unwrap_or(state.selected_hunk);
+    let old_line = state.current_line();
+    let old_cursor = state.cursor_row;
+
+    let files = load_diff(&state.args, &root)?;
+    state.files = files;
+
+    if state.files.is_empty() {
+        state.selected_file = 0;
+        state.selected_hunk = 0;
+        state.cursor_row = 0;
+        state.scroll.scroll_top = 0;
+        return Ok(());
+    }
+
+    let file_index = old_path
+        .and_then(|path| {
+            state
+                .files
+                .iter()
+                .position(|file| file.display_path() == path)
+        })
+        .unwrap_or_else(|| state.selected_file.min(state.files.len() - 1));
+
+    state.select_file(file_index);
+    let rows = state.rows_for(file_index);
+    let target = old_line
+        .and_then(|line| crate::review::rows::row_for_line(&rows, line))
+        .or_else(|| crate::review::rows::first_row_of_hunk(&rows, old_hunk))
+        .unwrap_or_else(|| old_cursor.min(rows.len().saturating_sub(1)));
+    state.set_cursor_row(target);
+    state.ensure_selected_file_visible();
+    Ok(())
+}
+
+// ── Loading diffs ───────────────────────────────────────────────────
+
+fn load_diff(args: &ReviewArgs, root: &Path) -> Result<Vec<DiffFile>, String> {
+    let diff_output = run_git_diff(args, root)?;
+    let mut files = parse_unified_diff(&diff_output);
+    apply_staged_status(&mut files, args, root);
+    Ok(files)
+}
+
+fn run_git_diff(args: &ReviewArgs, root: &Path) -> Result<String, String> {
     match args {
-        ReviewArgs::WorkingTree => run_working_tree_diff(),
-        ReviewArgs::Staged => diff_cmd(&["--cached", "--unified=3"]),
-        ReviewArgs::Against(rev) => diff_cmd(&[rev.as_str(), "--unified=3"]),
+        ReviewArgs::WorkingTree => run_working_tree_diff(root),
+        ReviewArgs::Staged => run_diff(root, &["diff", "--cached", "--unified=3"], &[]),
+        ReviewArgs::Against(rev) => run_diff(root, &["diff", rev.as_str(), "--unified=3"], &[]),
         ReviewArgs::Range(a, b) => {
             let range = format!("{}..{}", a, b);
-            diff_cmd(&[&range, "--unified=3"])
+            run_diff(root, &["diff", range.as_str(), "--unified=3"], &[])
         }
-        ReviewArgs::File(path) => diff_cmd(&["--unified=3", "--", path.as_str()]),
+        ReviewArgs::File(path) => run_diff(root, &["diff", "--unified=3"], &[path.as_str()]),
     }
 }
 
-fn diff_cmd(args: &[&str]) -> Result<String, String> {
-    let mut all = vec!["diff"];
-    all.extend_from_slice(args);
-    let output =
-        ijevim_core::git::raw(&all).map_err(|e| format!("Failed to run git diff: {}", e))?;
+/// Run `:review` (default): all changes since HEAD.
+fn run_working_tree_diff(root: &Path) -> Result<String, String> {
+    match run_diff(root, &["diff", "HEAD", "--unified=3"], &[]) {
+        Ok(output) => Ok(output),
+        Err(_) => {
+            // HEAD does not exist yet (empty repository). Combine staged and
+            // unstaged diffs.
+            let staged = run_diff(root, &["diff", "--cached", "--unified=3"], &[])?;
+            let unstaged = run_diff(root, &["diff", "--unified=3"], &[])?;
+            let mut combined = staged;
+            combined.push_str(&unstaged);
+            Ok(combined)
+        }
+    }
+}
+
+fn run_diff(root: &Path, base: &[&str], paths: &[&str]) -> Result<String, String> {
+    let mut args: Vec<&str> = base.to_vec();
+    args.extend_from_slice(&DIFF_OPTIONS);
+    if !paths.is_empty() {
+        args.push("--");
+        args.extend_from_slice(paths);
+    }
+    run_git(root, &args)
+}
+
+/// Run a git command inside `root`, returning stdout on success.
+fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git diff failed: {}", stderr))
+        Err(if stderr.is_empty() {
+            format!("git {} failed", args.join(" "))
+        } else {
+            stderr
+        })
     }
 }
 
-/// Run diff for `:review` (default): show all changes since HEAD.
-///
-/// Tries `git diff HEAD --unified=3` first (shows both staged and unstaged
-/// changes). Falls back to combining staged + unstaged separately when
-/// there is no HEAD commit yet (empty repository).
-fn run_working_tree_diff() -> Result<String, String> {
-    let head_result = ijevim_core::git::raw(&["diff", "HEAD", "--unified=3"])
-        .map_err(|e| format!("Failed to run git diff HEAD: {}", e))?;
+/// Mark hunks that are already present in the index.
+fn apply_staged_status(files: &mut [DiffFile], args: &ReviewArgs, root: &Path) {
+    match args {
+        ReviewArgs::Staged => {
+            for file in files.iter_mut() {
+                for hunk in file.hunks.iter_mut() {
+                    hunk.staged = true;
+                }
+            }
+        }
+        ReviewArgs::WorkingTree => {
+            let cached = run_diff(root, &["diff", "--cached", "--unified=3"], &[])
+                .map(|output| parse_unified_diff(&output))
+                .unwrap_or_default();
 
-    if head_result.status.success() {
-        return Ok(String::from_utf8_lossy(&head_result.stdout).to_string());
+            for file in files.iter_mut() {
+                let Some(cached_file) = cached
+                    .iter()
+                    .find(|candidate| candidate.display_path() == file.display_path())
+                else {
+                    continue;
+                };
+                for hunk in file.hunks.iter_mut() {
+                    hunk.staged = cached_file
+                        .hunks
+                        .iter()
+                        .any(|cached_hunk| hunks_equivalent(hunk, cached_hunk));
+                }
+            }
+        }
+        _ => {}
     }
+}
 
-    // HEAD doesn't exist yet (empty repo). Combine staged + unstaged.
-    let staged = ijevim_core::git::raw(&["diff", "--cached", "--unified=3"])
-        .map_err(|e| format!("Failed to run git diff --cached: {}", e))?;
-    let unstaged = ijevim_core::git::raw(&["diff", "--unified=3"])
-        .map_err(|e| format!("Failed to run git diff: {}", e))?;
-
-    if !staged.status.success() {
-        return Err(format!(
-            "git diff --cached failed: {}",
-            String::from_utf8_lossy(&staged.stderr).trim()
-        ));
-    }
-    if !unstaged.status.success() {
-        return Err(format!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&unstaged.stderr).trim()
-        ));
-    }
-
-    let mut combined = String::from_utf8_lossy(&staged.stdout).to_string();
-    combined.push_str(&String::from_utf8_lossy(&unstaged.stdout));
-    Ok(combined)
+/// Compare hunks by their HEAD-side position and content, ignoring the new
+/// line offset (which shifts when unrelated unstaged changes exist).
+fn hunks_equivalent(a: &Hunk, b: &Hunk) -> bool {
+    a.old_start == b.old_start
+        && a.old_count == b.old_count
+        && a.lines.len() == b.lines.len()
+        && a.lines.iter().zip(b.lines.iter()).all(|(left, right)| {
+            left.kind == right.kind
+                && left.content == right.content
+                && left.no_newline == right.no_newline
+        })
 }
 
 // ── Unified diff parser ─────────────────────────────────────────────
 
 /// Parse a unified diff string into structured `DiffFile` entries.
-///
-/// Handles:
-///   - `diff --git a/... b/...` file headers
-///   - `--- a/...` / `+++ b/...` path headers
-///   - `@@ -start,count +start,count @@ ...` hunk headers
-///   - Context, added, and deleted lines
-///   - `\ No newline at end of file` (skipped)
 pub fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
     let mut files: Vec<DiffFile> = Vec::new();
     let mut current_file: Option<DiffFileBuilder> = None;
 
     for line in input.lines() {
         if line.starts_with("diff --git ") {
-            // Finalize previous file
             if let Some(builder) = current_file.take() {
                 if let Some(file) = builder.build() {
                     files.push(file);
                 }
             }
 
-            // Extract paths from "diff --git a/old b/new"
             let paths = line.strip_prefix("diff --git ").unwrap_or(line);
             let (old, new) = parse_diff_paths(paths);
             current_file = Some(DiffFileBuilder {
-                old_path: old.unwrap_or_else(|| String::from("unknown")),
-                new_path: new.unwrap_or_else(|| String::from("unknown")),
+                old_path: old.unwrap_or_else(|| "unknown".to_string()),
+                new_path: new.unwrap_or_else(|| "unknown".to_string()),
                 status: FileStatus::Modified,
                 hunks: Vec::new(),
             });
-        } else if let Some(path) = line.strip_prefix("--- ") {
-            // Old file path (may include /dev/null)
-            if let Some(ref mut file) = current_file {
-                let cleaned = path.trim_start_matches("a/");
-                if cleaned == "/dev/null" || file.old_path == "unknown" {
-                    file.old_path = cleaned.to_string();
-                }
+        } else if let Some(rest) = line.strip_prefix("rename from ") {
+            if let Some(file) = current_file.as_mut() {
+                file.old_path = normalize_diff_path(rest);
+                file.status = FileStatus::Renamed;
             }
-        } else if let Some(path) = line.strip_prefix("+++ ") {
-            // New file path (may include /dev/null)
-            if let Some(ref mut file) = current_file {
-                let cleaned = path.trim_start_matches("b/");
-                if cleaned == "/dev/null" || file.new_path == "unknown" {
-                    file.new_path = cleaned.to_string();
-                }
+        } else if let Some(rest) = line.strip_prefix("rename to ") {
+            if let Some(file) = current_file.as_mut() {
+                file.new_path = normalize_diff_path(rest);
+                file.status = FileStatus::Renamed;
+            }
+        } else if line.starts_with("--- ")
+            && current_file
+                .as_ref()
+                .is_some_and(|file| file.hunks.is_empty())
+        {
+            // File headers only occur before the first hunk. Once inside a
+            // hunk, a line starting with `---` is deleted content.
+            if let Some(file) = current_file.as_mut() {
+                file.old_path = normalize_diff_path(&line[4..]);
+            }
+        } else if line.starts_with("+++ ")
+            && current_file
+                .as_ref()
+                .is_some_and(|file| file.hunks.is_empty())
+        {
+            if let Some(file) = current_file.as_mut() {
+                file.new_path = normalize_diff_path(&line[4..]);
             }
         } else if line.starts_with("@@") {
-            // Parse hunk header: @@ -start,count +start,count @@ optional header
-            if let Some(ref mut file) = current_file {
+            if let Some(file) = current_file.as_mut() {
                 if let Some(hunk) = parse_hunk_header(line) {
                     file.hunks.push(hunk);
                 }
             }
-        } else if line.starts_with('+') && line != "+++ b/" {
-            // Added line (but not the +++ header)
-            if let Some(ref mut file) = current_file {
+        } else if line.starts_with("\\ No newline at end of file") {
+            if let Some(file) = current_file.as_mut() {
                 if let Some(hunk) = file.hunks.last_mut() {
-                    let content = line.strip_prefix('+').unwrap_or("").to_string();
+                    if let Some(last) = hunk.lines.last_mut() {
+                        last.no_newline = true;
+                    }
+                }
+            }
+        } else if let Some(content) = line.strip_prefix('+') {
+            if let Some(file) = current_file.as_mut() {
+                if let Some(hunk) = file.hunks.last_mut() {
                     hunk.lines.push(DiffLine {
                         kind: DiffLineKind::Add,
-                        content,
+                        content: content.to_string(),
                         old_lineno: None,
                         new_lineno: Some(hunk.new_start + hunk.add_count),
+                        no_newline: false,
                     });
                     hunk.add_count += 1;
                 }
             }
-        } else if line.starts_with('-') && line != "--- a/" {
-            // Deleted line (but not the --- header)
-            if let Some(ref mut file) = current_file {
+        } else if let Some(content) = line.strip_prefix('-') {
+            if let Some(file) = current_file.as_mut() {
                 if let Some(hunk) = file.hunks.last_mut() {
-                    let content = line.strip_prefix('-').unwrap_or("").to_string();
                     hunk.lines.push(DiffLine {
                         kind: DiffLineKind::Delete,
-                        content,
+                        content: content.to_string(),
                         old_lineno: Some(hunk.old_start + hunk.del_count),
                         new_lineno: None,
+                        no_newline: false,
                     });
                     hunk.del_count += 1;
                 }
             }
-        } else if let Some(stripped) = line.strip_prefix(' ') {
-            // Context line
-            if let Some(ref mut file) = current_file {
+        } else if let Some(content) = line.strip_prefix(' ') {
+            if let Some(file) = current_file.as_mut() {
                 if let Some(hunk) = file.hunks.last_mut() {
                     hunk.lines.push(DiffLine {
                         kind: DiffLineKind::Context,
-                        content: stripped.to_string(),
+                        content: content.to_string(),
                         old_lineno: Some(hunk.old_start + hunk.del_count),
                         new_lineno: Some(hunk.new_start + hunk.add_count),
+                        no_newline: false,
                     });
                     hunk.del_count += 1;
                     hunk.add_count += 1;
                 }
             }
         }
-        // Skip "\ No newline at end of file" and other lines
     }
 
-    // Finalize last file
     if let Some(builder) = current_file.take() {
         if let Some(file) = builder.build() {
             files.push(file);
         }
     }
 
-    // Detect file status (Added/Deleted/Renamed) from paths
     for file in &mut files {
         if file.old_path == "/dev/null" {
             file.status = FileStatus::Added;
@@ -231,46 +349,79 @@ pub fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
     files
 }
 
-// ── Hunk stage/unstage via git apply ────────────────────────────────
+// ── Hunk / file staging via git apply ───────────────────────────────
 
 /// Reconstruct the unified-diff patch text for a single hunk.
-///
-/// This produces a minimal patch suitable for piping into `git apply`.
-/// The patch uses the file's `new_path` (the working tree path).
-pub fn hunk_to_patch(hunk: &Hunk, file_path: &str) -> String {
+pub fn hunk_to_patch(hunk: &Hunk, file: &DiffFile) -> String {
     let mut patch = String::new();
-    patch.push_str("--- a/");
-    patch.push_str(file_path);
-    patch.push('\n');
-    patch.push_str("+++ b/");
-    patch.push_str(file_path);
-    patch.push('\n');
+
+    if file.old_path != file.new_path
+        && file.old_path != "/dev/null"
+        && file.new_path != "/dev/null"
+    {
+        patch.push_str(&format!(
+            "diff --git {} {}\n",
+            patch_path("a/", &file.old_path),
+            patch_path("b/", &file.new_path)
+        ));
+        patch.push_str(&format!("rename from {}\n", file.old_path));
+        patch.push_str(&format!("rename to {}\n", file.new_path));
+    }
+
+    let old = if file.old_path == "/dev/null" {
+        "/dev/null".to_string()
+    } else {
+        patch_path("a/", &file.old_path)
+    };
+    let new = if file.new_path == "/dev/null" {
+        "/dev/null".to_string()
+    } else {
+        patch_path("b/", &file.new_path)
+    };
+
+    patch.push_str(&format!("--- {}\n+++ {}\n", old, new));
     patch.push_str(&hunk.header);
     patch.push('\n');
+
     for line in &hunk.lines {
         match line.kind {
-            DiffLineKind::Add => {
-                patch.push('+');
-            }
-            DiffLineKind::Delete => {
-                patch.push('-');
-            }
-            DiffLineKind::Context => {
-                patch.push(' ');
-            }
+            DiffLineKind::Add => patch.push('+'),
+            DiffLineKind::Delete => patch.push('-'),
+            DiffLineKind::Context => patch.push(' '),
         }
         patch.push_str(&line.content);
         patch.push('\n');
+        if line.no_newline {
+            patch.push_str("\\ No newline at end of file\n");
+        }
     }
+
     patch
 }
 
 /// Stage a single hunk by piping its patch to `git apply --cached`.
-pub fn stage_hunk(hunk: &Hunk, file_path: &str) -> Result<(), String> {
-    let patch = hunk_to_patch(hunk, file_path);
-    let mut child = std::process::Command::new("git")
-        .args(["apply", "--cached"])
-        .stdin(std::process::Stdio::piped())
+pub fn stage_hunk(hunk: &Hunk, file: &DiffFile, root: &Path) -> Result<(), String> {
+    apply_patch(root, &hunk_to_patch(hunk, file), false)
+}
+
+/// Unstage a single hunk by piping its reverse patch to `git apply --cached`.
+pub fn unstage_hunk(hunk: &Hunk, file: &DiffFile, root: &Path) -> Result<(), String> {
+    apply_patch(root, &hunk_to_patch(hunk, file), true)
+}
+
+fn apply_patch(root: &Path, patch: &str, reverse: bool) -> Result<(), String> {
+    let mut args = vec!["apply", "--cached"];
+    if reverse {
+        args.push("--reverse");
+    }
+
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn git apply: {}", e))?;
 
@@ -282,98 +433,205 @@ pub fn stage_hunk(hunk: &Hunk, file_path: &str) -> Result<(), String> {
     }
 
     let output = child
-        .wait()
+        .wait_with_output()
         .map_err(|e| format!("Failed to wait for git apply: {}", e))?;
 
-    if output.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        Err("git apply --cached failed, hunk may conflict with current index".to_string())
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "git apply --cached failed".to_string()
+        } else {
+            format!("git apply --cached failed: {}", stderr)
+        })
     }
 }
 
-/// Unstage a single hunk by piping its reverse patch to `git apply --cached --reverse`.
-pub fn unstage_hunk(hunk: &Hunk, file_path: &str) -> Result<(), String> {
-    let patch = hunk_to_patch(hunk, file_path);
-    let mut child = std::process::Command::new("git")
-        .args(["apply", "--cached", "--reverse"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn git apply --reverse: {}", e))?;
-
-    use std::io::Write;
-    if let Some(ref mut stdin) = child.stdin {
-        stdin
-            .write_all(patch.as_bytes())
-            .map_err(|e| format!("Failed to write patch to git apply: {}", e))?;
-    }
-
-    let output = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for git apply: {}", e))?;
-
-    if output.success() {
-        Ok(())
-    } else {
-        Err(
-            "git apply --cached --reverse failed, hunk may not be staged or may conflict"
-                .to_string(),
-        )
-    }
+/// Stage all changes in a file.
+pub fn stage_file(file: &DiffFile, root: &Path) -> Result<(), String> {
+    run_git(root, &["add", "-A", "--", file.display_path()]).map(|_| ())
 }
 
-// ── Internal helpers ────────────────────────────────────────────────
+/// Unstage all changes in a file.
+pub fn unstage_file(file: &DiffFile, root: &Path) -> Result<(), String> {
+    let path = file.display_path();
+    if run_git(root, &["restore", "--staged", "--", path]).is_ok() {
+        return Ok(());
+    }
+    if run_git(root, &["reset", "-q", "HEAD", "--", path]).is_ok() {
+        return Ok(());
+    }
+    run_git(root, &["rm", "--cached", "--", path]).map(|_| ())
+}
 
-/// Parse `diff --git a/path1 b/path2` into (old_path, new_path).
+/// Discard all index and worktree changes for a file.
+pub fn discard_file(file: &DiffFile, root: &Path) -> Result<(), String> {
+    let path = file.display_path();
+
+    if run_git(root, &["restore", "--staged", "--worktree", "--", path]).is_ok() {
+        return Ok(());
+    }
+
+    if file.status == FileStatus::Added {
+        return run_git(root, &["rm", "-f", "--", path]).map(|_| ());
+    }
+
+    if run_git(root, &["checkout", "HEAD", "--", path]).is_ok() {
+        return Ok(());
+    }
+    run_git(root, &["checkout", "--", path]).map(|_| ())
+}
+
+// ── Path parsing helpers ────────────────────────────────────────────
+
+/// Parse `diff --git a/path b/path` into (old_path, new_path).
 fn parse_diff_paths(s: &str) -> (Option<String>, Option<String>) {
-    let parts: Vec<&str> = s.splitn(4, ' ').collect();
-    // parts[0] = "a/path1", parts[1] = "b/path2" (or vice versa)
-    let old = parts
-        .iter()
-        .find(|p| p.starts_with("a/"))
-        .map(|p| p.strip_prefix("a/").unwrap_or(*p).to_string());
-    let new = parts
-        .iter()
-        .find(|p| p.starts_with("b/"))
-        .map(|p| p.strip_prefix("b/").unwrap_or(*p).to_string());
+    let s = s.trim();
+
+    // Quoted paths: "a/foo bar" "b/foo bar".
+    if let Some((first, next)) = parse_quoted_token(s, 0) {
+        let rest = s[next..].trim_start();
+        if let Some((second, _)) = parse_quoted_token(rest, 0) {
+            return (
+                Some(normalize_diff_path(&first)),
+                Some(normalize_diff_path(&second)),
+            );
+        }
+        let second = rest.split('\t').next().unwrap_or(rest);
+        return (
+            Some(normalize_diff_path(&first)),
+            Some(normalize_diff_path(second)),
+        );
+    }
+
+    // Unquoted paths with spaces: split on the last ` b/` / ` w/` boundary.
+    for marker in [" b/", " w/", " i/"] {
+        if let Some(index) = s.rfind(marker) {
+            let old = &s[..index];
+            let new = &s[index + 1..];
+            return (
+                Some(normalize_diff_path(old)),
+                Some(normalize_diff_path(new)),
+            );
+        }
+    }
+
+    // Fallback: whitespace-separated tokens.
+    let mut parts = s.split_whitespace();
+    let old = parts.next().map(normalize_diff_path);
+    let new = parts.next().map(normalize_diff_path);
     (old, new)
 }
 
-/// Parse `@@ -start,count +start,count @@ header`
-fn parse_hunk_header(line: &str) -> Option<HunkBuilder> {
-    let line = line.strip_prefix("@@")?;
-    let (range_part, _header) = line.split_once("@@")?;
-    let range_part = range_part.trim();
+/// Parse one C-style quoted git path starting at `start`.
+fn parse_quoted_token(s: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    if start >= bytes.len() || bytes[start] != b'"' {
+        return None;
+    }
 
-    // Parse "-start,count +start,count"
-    let (old_part, new_part) = range_part.split_once(' ')?;
-
-    let (old_start, old_count) = parse_range(old_part)?;
-    let (new_start, new_count) = parse_range(new_part)?;
-
-    Some(HunkBuilder {
-        old_start,
-        old_count,
-        new_start,
-        new_count,
-        lines: Vec::new(),
-        add_count: 0,
-        del_count: 0,
-    })
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                return Some((String::from_utf8_lossy(&out).to_string(), i + 1));
+            }
+            b'\\' => {
+                i += 1;
+                if i >= bytes.len() {
+                    break;
+                }
+                match bytes[i] {
+                    b'a' => out.push(0x07),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0c),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'v' => out.push(0x0b),
+                    b'\\' => out.push(b'\\'),
+                    b'"' => out.push(b'"'),
+                    b'0'..=b'7' => {
+                        let mut value = 0u8;
+                        let mut digits = 0;
+                        while digits < 3 && i < bytes.len() && (b'0'..=b'7').contains(&bytes[i]) {
+                            value = value * 8 + (bytes[i] - b'0');
+                            i += 1;
+                            digits += 1;
+                        }
+                        out.push(value);
+                        continue;
+                    }
+                    other => out.push(other),
+                }
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    None
 }
 
-/// Parse `-start,count` or `+start,count` into (start, count).
-fn parse_range(s: &str) -> Option<(usize, usize)> {
-    let s = s.strip_prefix('-').or_else(|| s.strip_prefix('+'))?;
-    if let Some((start, count)) = s.split_once(',') {
-        Some((start.parse().ok()?, count.parse().ok()?))
+/// Normalise a path from a diff header.
+fn normalize_diff_path(raw: &str) -> String {
+    let raw = raw.trim_end();
+    let raw = raw.split('\t').next().unwrap_or(raw).trim();
+
+    let raw = if raw.starts_with('"') {
+        parse_quoted_token(raw, 0)
+            .map(|(token, _)| token)
+            .unwrap_or_else(|| raw.to_string())
     } else {
-        // If count is omitted, it's 1
-        Some((s.parse().ok()?, 1))
+        raw.to_string()
+    };
+
+    strip_diff_prefix(&raw)
+}
+
+fn strip_diff_prefix(path: &str) -> String {
+    if path == "/dev/null" {
+        return path.to_string();
+    }
+    for prefix in ["a/", "b/", "i/", "w/", "c/", "o/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Quote a path for a patch header if it contains characters that would break
+/// line parsing. Spaces are accepted unquoted by `git apply`.
+fn patch_path(prefix: &str, path: &str) -> String {
+    let needs_quote = path
+        .chars()
+        .any(|ch| ch == '"' || ch == '\\' || ch == '\n' || ch == '\r' || ch == '\t');
+    if needs_quote {
+        format!("\"{}{}\"", prefix, escape_git_path(path))
+    } else {
+        format!("{}{}", prefix, path)
     }
 }
 
-// ── Builder types (for incremental parsing) ─────────────────────────
+fn escape_git_path(path: &str) -> String {
+    let mut out = String::new();
+    for byte in path.bytes() {
+        match byte {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            byte if !(0x20..0x7f).contains(&byte) => out.push_str(&format!("\\{:03o}", byte)),
+            byte => out.push(byte as char),
+        }
+    }
+    out
+}
+
+// ── Internal builder types ──────────────────────────────────────────
 
 struct DiffFileBuilder {
     old_path: String,
@@ -387,29 +645,10 @@ impl DiffFileBuilder {
         if self.hunks.is_empty() {
             return None;
         }
-        let hunks: Vec<Hunk> = self
-            .hunks
-            .into_iter()
-            .map(|h| {
-                let header = format!(
-                    "@@ -{},{} +{},{} @@",
-                    h.old_start, h.old_count, h.new_start, h.new_count
-                );
-                Hunk {
-                    old_start: h.old_start,
-                    old_count: h.old_count,
-                    new_start: h.new_start,
-                    new_count: h.new_count,
-                    header,
-                    lines: h.lines,
-                    staged: false,
-                }
-            })
-            .collect();
+
+        let hunks: Vec<Hunk> = self.hunks.into_iter().map(HunkBuilder::build).collect();
 
         let mut status = self.status;
-
-        // Detect special cases
         if self.old_path == "/dev/null" {
             status = FileStatus::Added;
         } else if self.new_path == "/dev/null" {
@@ -432,490 +671,377 @@ struct HunkBuilder {
     old_count: usize,
     new_start: usize,
     new_count: usize,
+    header: String,
     lines: Vec<DiffLine>,
-    /// Running counter for tracking old-line numbering
     add_count: usize,
-    /// Running counter for tracking new-line numbering
     del_count: usize,
 }
 
-// ── Tests ───────────────────────────────────────────────────────────
+impl HunkBuilder {
+    fn build(self) -> Hunk {
+        Hunk {
+            old_start: self.old_start,
+            old_count: self.old_count,
+            new_start: self.new_start,
+            new_count: self.new_count,
+            header: self.header,
+            lines: self.lines,
+            staged: false,
+        }
+    }
+}
+
+/// Parse `@@ -start,count +start,count @@ header` keeping the original header
+/// text (including the function context after the closing `@@`).
+fn parse_hunk_header(line: &str) -> Option<HunkBuilder> {
+    let after = line.strip_prefix("@@")?;
+    let (range_part, _section) = after.split_once("@@")?;
+    let range_part = range_part.trim();
+    let (old_part, new_part) = range_part.split_once(' ')?;
+
+    let (old_start, old_count) = parse_range(old_part)?;
+    let (new_start, new_count) = parse_range(new_part)?;
+
+    Some(HunkBuilder {
+        old_start,
+        old_count,
+        new_start,
+        new_count,
+        header: line.to_string(),
+        lines: Vec::new(),
+        add_count: 0,
+        del_count: 0,
+    })
+}
+
+/// Parse `-start,count` or `+start,count` into (start, count).
+fn parse_range(s: &str) -> Option<(usize, usize)> {
+    let s = s.strip_prefix('-').or_else(|| s.strip_prefix('+'))?;
+    if let Some((start, count)) = s.split_once(',') {
+        Some((start.parse().ok()?, count.parse().ok()?))
+    } else {
+        Some((s.parse().ok()?, 1))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // ── Parser ──────────────────────────────────────────────────────
 
     #[test]
-    fn parse_empty_diff() {
-        let files = parse_unified_diff("");
-        assert!(files.is_empty());
-    }
-
-    #[test]
-    fn parse_simple_diff() {
-        let input = "\
+    fn parses_hunks_and_line_numbers() {
+        let diff = "\
 diff --git a/src/main.rs b/src/main.rs
-index abc..def 100644
+index 1111111..2222222 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -1,3 +1,4 @@
- line1
- line2
--old line
-+new line
-+extra line
+@@ -1,3 +1,4 @@ fn main() {
+ context
+-old
++new
++extra
 ";
-        let files = parse_unified_diff(input);
+        let files = parse_unified_diff(diff);
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].status, FileStatus::Modified);
-        assert_eq!(files[0].old_path, "src/main.rs");
-        assert_eq!(files[0].new_path, "src/main.rs");
-        assert_eq!(files[0].hunks.len(), 1);
-
-        let hunk = &files[0].hunks[0];
-        assert_eq!(hunk.lines.len(), 5);
-        assert_eq!(hunk.lines[0].kind, DiffLineKind::Context);
-        assert_eq!(hunk.lines[2].kind, DiffLineKind::Delete);
-        assert_eq!(hunk.lines[3].kind, DiffLineKind::Add);
-        assert_eq!(hunk.lines[4].kind, DiffLineKind::Add);
+        let file = &files[0];
+        assert_eq!(file.status, FileStatus::Modified);
+        assert_eq!(file.display_path(), "src/main.rs");
+        let hunk = &file.hunks[0];
+        assert_eq!(hunk.header, "@@ -1,3 +1,4 @@ fn main() {");
+        assert_eq!(hunk.lines.len(), 4);
+        assert_eq!(hunk.lines[0].old_lineno, Some(1));
+        assert_eq!(hunk.lines[0].new_lineno, Some(1));
+        assert_eq!(hunk.lines[1].old_lineno, Some(2));
+        assert_eq!(hunk.lines[2].new_lineno, Some(2));
+        assert_eq!(hunk.lines[3].new_lineno, Some(3));
     }
 
     #[test]
-    fn parse_multiple_files() {
-        let input = "\
-diff --git a/a.rs b/a.rs
---- a/a.rs
-+++ b/a.rs
+    fn parses_mnemonic_prefixes_and_header_tabs() {
+        let diff = "\
+diff --git i/a b.txt w/a b.txt
+index 1111111..2222222 100644
+--- i/a b.txt	
++++ w/a b.txt	
 @@ -1 +1,2 @@
- a
-+b
-diff --git a/b.rs b/b.rs
---- a/b.rs
-+++ b/b.rs
-@@ -1 +1 @@
--x
-+y
+ one
++two
 ";
-        let files = parse_unified_diff(input);
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].new_path, "a.rs");
-        assert_eq!(files[1].new_path, "b.rs");
+        let files = parse_unified_diff(diff);
+        assert_eq!(files[0].old_path, "a b.txt");
+        assert_eq!(files[0].new_path, "a b.txt");
+        assert_eq!(files[0].hunks[0].lines[1].content, "two");
     }
 
     #[test]
-    fn parse_new_file() {
-        let input = "\
-diff --git a/src/new.rs b/src/new.rs
+    fn parses_quoted_paths() {
+        let diff = "\
+diff --git \"a/foo bar.txt\" \"b/foo bar.txt\"
+index 1111111..2222222 100644
+--- \"a/foo bar.txt\"
++++ \"b/foo bar.txt\"
+@@ -1 +1,2 @@
+ one
++two
+";
+        let files = parse_unified_diff(diff);
+        assert_eq!(files[0].old_path, "foo bar.txt");
+        assert_eq!(files[0].new_path, "foo bar.txt");
+    }
+
+    #[test]
+    fn content_starting_with_header_markers_stays_content() {
+        let diff = "\
+diff --git a/text b/text
+index 1111111..2222222 100644
+--- a/text
++++ b/text
+@@ -1 +1,2 @@
+ keep
+++++ not a file header
+";
+        let files = parse_unified_diff(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].hunks[0].lines[1].kind, DiffLineKind::Add);
+        assert_eq!(files[0].hunks[0].lines[1].content, "+++ not a file header");
+    }
+
+    #[test]
+    fn records_no_newline_markers() {
+        let diff = "\
+diff --git a/text b/text
+index 1111111..2222222 100644
+--- a/text
++++ b/text
+@@ -1,2 +1,2 @@
+ one
+-two
+\\ No newline at end of file
++two
+";
+        let files = parse_unified_diff(diff);
+        let lines = &files[0].hunks[0].lines;
+        assert!(lines[1].no_newline);
+        assert!(!lines[2].no_newline);
+    }
+
+    #[test]
+    fn added_and_deleted_files_are_classified() {
+        let added = "\
+diff --git a/new.txt b/new.txt
 new file mode 100644
-index 000..abc
 --- /dev/null
-+++ b/src/new.rs
-@@ -0,0 +1,3 @@
-+fn new_fn() {
-+    todo!()
-+}
++++ b/new.txt
+@@ -0,0 +1 @@
++hello
 ";
-        let files = parse_unified_diff(input);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].status, FileStatus::Added);
-        assert_eq!(files[0].hunks[0].lines.len(), 3);
-    }
-
-    #[test]
-    fn parse_deleted_file() {
-        let input = "\
-diff --git a/src/old.rs b/src/old.rs
+        let deleted = "\
+diff --git a/old.txt b/old.txt
 deleted file mode 100644
-index abc..000
---- a/src/old.rs
+--- a/old.txt
 +++ /dev/null
-@@ -1,2 +0,0 @@
--dead
--code
+@@ -1 +0,0 @@
+-goodbye
 ";
-        let files = parse_unified_diff(input);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].status, FileStatus::Deleted);
+        assert_eq!(parse_unified_diff(added)[0].status, FileStatus::Added);
+        assert_eq!(parse_unified_diff(deleted)[0].status, FileStatus::Deleted);
     }
 
     #[test]
-    fn run_git_diff_on_self() {
-        // This test requires being in a git repo
-        if ijevim_core::git::find_root().is_none() {
-            eprintln!("Skipping git diff test (not in a repo)");
-            return;
-        }
-        let result = run_git_diff(&ReviewArgs::WorkingTree);
-        assert!(result.is_ok());
+    fn hunk_patch_targets_dev_null_for_new_and_deleted_files() {
+        let added = parse_unified_diff(
+            "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
+        );
+        let patch = hunk_to_patch(&added[0].hunks[0], &added[0]);
+        assert!(patch.contains("--- /dev/null\n+++ b/new.txt\n"));
+
+        let deleted = parse_unified_diff(
+            "diff --git a/old.txt b/old.txt\ndeleted file mode 100644\n--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-goodbye\n",
+        );
+        let patch = hunk_to_patch(&deleted[0].hunks[0], &deleted[0]);
+        assert!(patch.contains("--- a/old.txt\n+++ /dev/null\n"));
     }
 
     #[test]
-    fn hunk_to_patch_basic() {
-        let hunk = Hunk {
-            old_start: 10,
-            old_count: 7,
-            new_start: 10,
-            new_count: 9,
-            header: "@@ -10,7 +10,9 @@ fn main() {".to_string(),
-            staged: false,
-            lines: vec![
-                DiffLine {
-                    kind: DiffLineKind::Context,
-                    content: "    let x = 1;".to_string(),
-                    old_lineno: Some(10),
-                    new_lineno: Some(10),
-                },
-                DiffLine {
-                    kind: DiffLineKind::Delete,
-                    content: "    println!(\"old\");".to_string(),
-                    old_lineno: Some(12),
-                    new_lineno: None,
-                },
-                DiffLine {
-                    kind: DiffLineKind::Add,
-                    content: "    println!(\"new\");".to_string(),
-                    old_lineno: None,
-                    new_lineno: Some(12),
-                },
-                DiffLine {
-                    kind: DiffLineKind::Context,
-                    content: "    let z = 3;".to_string(),
-                    old_lineno: Some(14),
-                    new_lineno: Some(15),
-                },
-            ],
-        };
-
-        let patch = hunk_to_patch(&hunk, "src/main.rs");
-        let expected = "\
---- a/src/main.rs
-+++ b/src/main.rs
-@@ -10,7 +10,9 @@ fn main() {
-     let x = 1;
--    println!(\"old\");
-+    println!(\"new\");
-     let z = 3;
-";
-        assert_eq!(patch, expected);
+    fn hunk_patch_round_trips_no_newline_marker() {
+        let files = parse_unified_diff(
+            "diff --git a/text b/text\n--- a/text\n+++ b/text\n@@ -1,2 +1,2 @@\n one\n-two\n\\ No newline at end of file\n+two\n",
+        );
+        let patch = hunk_to_patch(&files[0].hunks[0], &files[0]);
+        assert!(patch.contains("-two\n\\ No newline at end of file\n"));
     }
 
-    #[test]
-    fn hunk_to_patch_new_file() {
-        let hunk = Hunk {
-            old_start: 0,
-            old_count: 0,
-            new_start: 1,
-            new_count: 2,
-            header: "@@ -0,0 +1,2 @@".to_string(),
-            staged: false,
-            lines: vec![
-                DiffLine {
-                    kind: DiffLineKind::Add,
-                    content: "fn new_fn() {".to_string(),
-                    old_lineno: None,
-                    new_lineno: Some(1),
-                },
-                DiffLine {
-                    kind: DiffLineKind::Add,
-                    content: "    todo!()".to_string(),
-                    old_lineno: None,
-                    new_lineno: Some(2),
-                },
-            ],
-        };
+    // ── Integration with a temporary repository ────────────────────
 
-        let patch = hunk_to_patch(&hunk, "src/new.rs");
-        assert!(patch.contains("--- a/src/new.rs"));
-        assert!(patch.contains("+++ b/src/new.rs"));
-        assert!(patch.contains("@@ -0,0 +1,2 @@"));
-        assert!(patch.contains("+fn new_fn() {"));
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempRepo {
+        path: PathBuf,
     }
 
-    #[test]
-    fn parse_binary_diff_skipped() {
-        // Binary diff lines should be skipped — the parser returns an empty
-        // file entry (no hunks) which gets filtered out by build().
-        let input = "\
-diff --git a/image.png b/image.png
-index abc..def 100644
-Binary files a/image.png and b/image.png differ
-";
-        let files = parse_unified_diff(input);
-        // Binary diffs have no hunks, so build() returns None and the file
-        // is not included.
-        assert!(files.is_empty(), "binary diffs should produce no files");
-    }
+    impl TempRepo {
+        fn new() -> Self {
+            let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir().join(format!(
+                "ijevim-review-test-{}-{}",
+                std::process::id(),
+                id
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            let repo = Self { path };
+            repo.git(&["init", "-q"]);
+            repo.git(&["config", "user.email", "test@example.com"]);
+            repo.git(&["config", "user.name", "Test"]);
+            repo.git(&["config", "core.autocrlf", "false"]);
+            repo
+        }
 
-    #[test]
-    fn parse_diff_with_binary_and_text() {
-        let input = "\
-diff --git a/image.png b/image.png
-Binary files a/image.png and b/image.png differ
-diff --git a/src/main.rs b/src/main.rs
---- a/src/main.rs
-+++ b/src/main.rs
-@@ -1 +1,2 @@
- a
-+b
-";
-        let files = parse_unified_diff(input);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].new_path, "src/main.rs");
-    }
+        fn git(&self, args: &[&str]) {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&self.path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
 
-    #[test]
-    fn parse_staged_args() {
-        // Verify ReviewArgs parse --staged and --cached correctly
-        match ReviewArgs::parse("--staged") {
-            ReviewArgs::Staged => {}
-            other => panic!("expected Staged, got {:?}", other),
+        fn write(&self, name: &str, content: &str) {
+            fs::write(self.path.join(name), content).unwrap();
         }
-        match ReviewArgs::parse("--cached") {
-            ReviewArgs::Staged => {}
-            other => panic!("expected Staged (cached), got {:?}", other),
-        }
-        match ReviewArgs::parse("") {
-            ReviewArgs::WorkingTree => {}
-            other => panic!("expected WorkingTree, got {:?}", other),
-        }
-        match ReviewArgs::parse("HEAD") {
-            ReviewArgs::Against(ref s) if s == "HEAD" => {}
-            other => panic!("expected Against(HEAD), got {:?}", other),
-        }
-        match ReviewArgs::parse("HEAD~3") {
-            ReviewArgs::Against(ref s) if s == "HEAD~3" => {}
-            other => panic!("expected Against(HEAD~3), got {:?}", other),
-        }
-        match ReviewArgs::parse("main..feature") {
-            ReviewArgs::Range(ref a, ref b) if a == "main" && b == "feature" => {}
-            other => panic!("expected Range(main, feature), got {:?}", other),
+
+        fn commit_all(&self, message: &str) {
+            self.git(&["add", "-A"]);
+            self.git(&["commit", "-qm", message]);
         }
     }
 
-    #[test]
-    fn stage_hunk_integration() {
-        // Only run in a git repo (this project)
-        let _root = match ijevim_core::git::find_root() {
-            Some(r) => r,
-            None => {
-                eprintln!("Skipping stage_hunk test (not in a repo)");
-                return;
-            }
-        };
-
-        // Create a temp file to apply a patch to
-        let tmp_dir = std::env::temp_dir().join("ijevim_test_stage_hunk");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir).unwrap();
-
-        // Init a git repo with a test file
-        let status = std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
-
-        // Write initial content and commit
-        std::fs::write(tmp_dir.join("test.txt"), "line1\nline2\nline3\n").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
-
-        // Modify the file to create a diff
-        std::fs::write(tmp_dir.join("test.txt"), "line1\nline2\nline3\nline4\n").unwrap();
-
-        // Build a hunk representing the addition
-        let hunk = Hunk {
-            old_start: 3,
-            old_count: 1,
-            new_start: 3,
-            new_count: 2,
-            header: "@@ -3,1 +3,2 @@".to_string(),
-            staged: false,
-            lines: vec![
-                DiffLine {
-                    kind: DiffLineKind::Context,
-                    content: "line3".to_string(),
-                    old_lineno: Some(3),
-                    new_lineno: Some(3),
-                },
-                DiffLine {
-                    kind: DiffLineKind::Add,
-                    content: "line4".to_string(),
-                    old_lineno: None,
-                    new_lineno: Some(4),
-                },
-            ],
-        };
-
-        // Stage the hunk
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Change directory to tmp_dir for git apply to work
-            let original_dir = std::env::current_dir().unwrap();
-            std::env::set_current_dir(&tmp_dir).unwrap();
-
-            let stage_result = stage_hunk(&hunk, "test.txt");
-
-            std::env::set_current_dir(original_dir).unwrap();
-            stage_result
-        }));
-
-        match result {
-            Ok(Ok(())) => {
-                // Verify the hunk is now staged (git diff --cached shows the change)
-                let output = std::process::Command::new("git")
-                    .args(["diff", "--cached"])
-                    .current_dir(&tmp_dir)
-                    .output()
-                    .unwrap();
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                assert!(
-                    stdout.contains("+line4"),
-                    "Staged diff should contain +line4, got: {}",
-                    stdout
-                );
-                eprintln!("stage_hunk integration test PASSED");
-            }
-            Ok(Err(e)) => {
-                eprintln!("stage_hunk returned error: {}", e);
-                // Not a hard failure — git version or environment may differ
-            }
-            Err(_) => {
-                eprintln!("stage_hunk panicked (expected in some environments)");
-            }
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
         }
+    }
 
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+    fn working_diff(root: &Path) -> Vec<DiffFile> {
+        let output = run_diff(root, &["diff", "HEAD", "--unified=3"], &[]).unwrap();
+        parse_unified_diff(&output)
+    }
+
+    fn cached_diff(root: &Path) -> String {
+        run_diff(root, &["diff", "--cached", "--unified=3"], &[]).unwrap()
     }
 
     #[test]
-    fn unstage_hunk_integration() {
-        // Only run in a git repo
-        if ijevim_core::git::find_root().is_none() {
-            eprintln!("Skipping unstage_hunk test (not in a repo)");
-            return;
-        }
+    fn stages_hunk_in_file_with_spaces() {
+        let repo = TempRepo::new();
+        repo.write("a b.txt", "one\ntwo\n");
+        repo.commit_all("init");
+        repo.write("a b.txt", "one\ntwo\nthree\n");
 
-        let tmp_dir = std::env::temp_dir().join("ijevim_test_unstage_hunk");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let files = working_diff(&repo.path);
+        assert_eq!(files[0].display_path(), "a b.txt");
+        stage_hunk(&files[0].hunks[0], &files[0], &repo.path).unwrap();
+        assert!(cached_diff(&repo.path).contains("+three"));
+    }
 
-        // Init a git repo with a test file
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(&tmp_dir)
-            .status()
+    #[test]
+    fn stages_hunk_without_trailing_newline() {
+        let repo = TempRepo::new();
+        repo.write("text.txt", "one\ntwo");
+        repo.commit_all("init");
+        repo.write("text.txt", "one\ntwo\nthree\n");
+
+        let files = working_diff(&repo.path);
+        assert!(files[0].hunks[0].lines.iter().any(|line| line.no_newline));
+        stage_hunk(&files[0].hunks[0], &files[0], &repo.path).unwrap();
+        assert!(cached_diff(&repo.path).contains("+three"));
+    }
+
+    #[test]
+    fn stages_added_and_deleted_files() {
+        let repo = TempRepo::new();
+        repo.write("old.txt", "goodbye\n");
+        repo.commit_all("init");
+
+        fs::remove_file(repo.path.join("old.txt")).unwrap();
+        repo.write("new file.txt", "hello\n");
+        repo.git(&["add", "-N", "new file.txt"]);
+
+        let files = working_diff(&repo.path);
+        let added = files
+            .iter()
+            .find(|file| file.status == FileStatus::Added)
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&tmp_dir)
-            .status()
+        stage_hunk(&added.hunks[0], added, &repo.path).unwrap();
+        assert!(cached_diff(&repo.path).contains("+hello"));
+
+        let files = working_diff(&repo.path);
+        let deleted = files
+            .iter()
+            .find(|file| file.status == FileStatus::Deleted)
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
+        stage_hunk(&deleted.hunks[0], deleted, &repo.path).unwrap();
+        assert!(cached_diff(&repo.path).contains("-goodbye"));
+    }
 
-        // Write initial content and commit
-        std::fs::write(tmp_dir.join("test.txt"), "line1\nline2\nline3\n").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
+    #[test]
+    fn staged_status_is_derived_from_the_index() {
+        let repo = TempRepo::new();
+        repo.write("text.txt", "one\n");
+        repo.commit_all("init");
+        repo.write("text.txt", "one\ntwo\n");
 
-        // Modify and stage the full file
-        std::fs::write(tmp_dir.join("test.txt"), "line1\nline2\nline3\nline4\n").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&tmp_dir)
-            .status()
-            .unwrap();
-        // Now the addition is staged
+        let files = working_diff(&repo.path);
+        stage_hunk(&files[0].hunks[0], &files[0], &repo.path).unwrap();
 
-        // Try to unstage just the hunk for line4
-        let hunk = Hunk {
-            old_start: 3,
-            old_count: 1,
-            new_start: 3,
-            new_count: 2,
-            header: "@@ -3,1 +3,2 @@".to_string(),
-            staged: true,
-            lines: vec![
-                DiffLine {
-                    kind: DiffLineKind::Context,
-                    content: "line3".to_string(),
-                    old_lineno: Some(3),
-                    new_lineno: Some(3),
-                },
-                DiffLine {
-                    kind: DiffLineKind::Add,
-                    content: "line4".to_string(),
-                    old_lineno: None,
-                    new_lineno: Some(4),
-                },
-            ],
-        };
+        let reloaded = load_diff(&ReviewArgs::WorkingTree, &repo.path).unwrap();
+        assert!(reloaded[0].hunks[0].staged);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let original_dir = std::env::current_dir().unwrap();
-            std::env::set_current_dir(&tmp_dir).unwrap();
+        unstage_hunk(&reloaded[0].hunks[0], &reloaded[0], &repo.path).unwrap();
+        let reloaded = load_diff(&ReviewArgs::WorkingTree, &repo.path).unwrap();
+        assert!(!reloaded[0].hunks[0].staged);
+    }
 
-            let unstage_result = unstage_hunk(&hunk, "test.txt");
+    #[test]
+    fn file_stage_and_unstage_round_trip() {
+        let repo = TempRepo::new();
+        repo.write("text.txt", "one\n");
+        repo.commit_all("init");
+        repo.write("text.txt", "one\ntwo\n");
 
-            std::env::set_current_dir(original_dir).unwrap();
-            unstage_result
-        }));
+        let files = working_diff(&repo.path);
+        stage_file(&files[0], &repo.path).unwrap();
+        assert!(cached_diff(&repo.path).contains("+two"));
 
-        match result {
-            Ok(Ok(())) => {
-                // Verify hunk is no longer staged
-                let output = std::process::Command::new("git")
-                    .args(["diff", "--cached"])
-                    .current_dir(&tmp_dir)
-                    .output()
-                    .unwrap();
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                assert!(
-                    !stdout.contains("+line4"),
-                    "After unstage, diff --cached should NOT contain line4, got: {}",
-                    stdout
-                );
-                eprintln!("unstage_hunk integration test PASSED");
-            }
-            Ok(Err(e)) => {
-                eprintln!("unstage_hunk returned error: {}", e);
-            }
-            Err(_) => {
-                eprintln!("unstage_hunk panicked (expected in some environments)");
-            }
-        }
+        let files = working_diff(&repo.path);
+        unstage_file(&files[0], &repo.path).unwrap();
+        assert!(!cached_diff(&repo.path).contains("+two"));
+    }
 
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+    #[test]
+    fn discards_worktree_changes() {
+        let repo = TempRepo::new();
+        repo.write("text.txt", "one\n");
+        repo.commit_all("init");
+        repo.write("text.txt", "one\ntwo\n");
+
+        let files = working_diff(&repo.path);
+        discard_file(&files[0], &repo.path).unwrap();
+        assert_eq!(
+            fs::read_to_string(repo.path.join("text.txt")).unwrap(),
+            "one\n"
+        );
+        assert!(working_diff(&repo.path).is_empty());
     }
 }

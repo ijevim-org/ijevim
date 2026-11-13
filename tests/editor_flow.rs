@@ -2043,6 +2043,367 @@ async fn review_reports_git_failures_instead_of_mocking() {
     );
 }
 
+use ijevim::review::{
+    annotations as review_annotations, Annotation, DiffFile, DiffLine, DiffLineKind, FileStatus,
+    Hunk, ReviewSubMode, ScrollState,
+};
+
+fn review_file(path: &str) -> DiffFile {
+    DiffFile {
+        status: FileStatus::Modified,
+        old_path: path.to_string(),
+        new_path: path.to_string(),
+        hunks: vec![Hunk {
+            old_start: 1,
+            old_count: 1,
+            new_start: 1,
+            new_count: 2,
+            header: "@@ -1,1 +1,2 @@".to_string(),
+            staged: false,
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "keep".to_string(),
+                    old_lineno: Some(1),
+                    new_lineno: Some(1),
+                    no_newline: false,
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    content: "added".to_string(),
+                    old_lineno: None,
+                    new_lineno: Some(2),
+                    no_newline: false,
+                },
+            ],
+        }],
+    }
+}
+
+fn install_review_fixture(ed: &mut Editor, files: Vec<DiffFile>) {
+    let state = ed
+        .engine
+        .review_state
+        .as_mut()
+        .expect("review mode must already be active");
+    state.files = files;
+    state.selected_file = 0;
+    state.selected_hunk = 0;
+    state.cursor_row = 0;
+    state.scroll = ScrollState::default();
+    state.viewport_height = 10;
+    state.sub_mode = ReviewSubMode::DiffView;
+    state.annotations.clear();
+    state.project_root = None;
+    state.comment_buffer.clear();
+    state.comment_cursor = 0;
+    state.comment_target = None;
+}
+
+#[tokio::test]
+async fn review_preview_escape_returns_to_diff_view() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+
+    let state = ed.engine.review_state.as_mut().unwrap();
+    state.sub_mode = ReviewSubMode::Preview;
+
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().sub_mode,
+        ReviewSubMode::DiffView,
+        "Esc from preview must return to the diff, not exit review"
+    );
+}
+
+#[tokio::test]
+async fn review_comment_targets_the_cursor_line() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    // Rows: 0 = hunk header, 1 = context (line 1), 2 = added (line 2).
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 2;
+
+    press_key(&mut ed, KeyCode::Char('c')).await;
+    type_keys(&mut ed, "needs tests").await;
+    ed.handle_key_for_test(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.sub_mode, ReviewSubMode::DiffView);
+    assert_eq!(state.annotations.len(), 1);
+    assert_eq!(state.annotations[0].line, 2);
+    assert_eq!(state.annotations[0].file_path, "src/main.rs");
+    assert_eq!(state.annotations[0].text, "needs tests");
+}
+
+#[tokio::test]
+async fn review_comment_persists_and_reloads() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    let root = std::env::temp_dir().join(format!(
+        "ijevim-review-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    ed.engine.review_state.as_mut().unwrap().project_root = Some(root.clone());
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 2;
+
+    press_key(&mut ed, KeyCode::Char('c')).await;
+    type_keys(&mut ed, "persist me").await;
+    ed.handle_key_for_test(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    let loaded = review_annotations::load_annotations(&root);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].line, 2);
+    assert_eq!(loaded[0].text, "persist me");
+
+    // A fresh review state shows the stored annotation again.
+    ed.engine.review_state.as_mut().unwrap().annotations = loaded;
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().annotations.len(),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn review_annotation_browser_jumps_to_the_right_file_and_line() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(
+        &mut ed,
+        vec![review_file("src/a.rs"), review_file("src/b.rs")],
+    );
+
+    let state = ed.engine.review_state.as_mut().unwrap();
+    state.annotations = vec![Annotation {
+        id: "ann-test".to_string(),
+        file_path: "src/b.rs".to_string(),
+        line: 2,
+        end_line: None,
+        text: "look here".to_string(),
+        resolved: false,
+        created_at: "2026-11-13T00:00:00Z".to_string(),
+    }];
+    state.sub_mode = ReviewSubMode::Annotations;
+    state.annotation_selected = 0;
+
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.sub_mode, ReviewSubMode::DiffView);
+    assert_eq!(state.selected_file, 1);
+    assert_eq!(state.current_line(), Some(2));
+}
+
+#[tokio::test]
+async fn review_visual_selection_creates_a_multiline_annotation() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    // Rows: 0 = hunk header, 1 = context line 1, 2 = added line 2.
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 1;
+    press_key(&mut ed, KeyCode::Char('v')).await;
+    press_key(&mut ed, KeyCode::Char('j')).await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.selection_lines(), Some((1, 2)));
+    assert!(state.is_row_selected(1));
+    assert!(state.is_row_selected(2));
+
+    press_key(&mut ed, KeyCode::Char('c')).await;
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.sub_mode, ReviewSubMode::CommentInput);
+    assert_eq!(state.comment_target.as_ref().unwrap().line, 1);
+    assert_eq!(state.comment_target.as_ref().unwrap().end_line, Some(2));
+
+    type_keys(&mut ed, "range comment").await;
+    ed.handle_key_for_test(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    let annotation = state.annotations.last().unwrap();
+    assert_eq!(annotation.line, 1);
+    assert_eq!(annotation.end_line, Some(2));
+    assert!(state.comment_anchor.is_none());
+
+    // Esc clears an active visual selection instead of leaving the diff.
+    ed.engine.review_state.as_mut().unwrap().sub_mode = ReviewSubMode::DiffView;
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 1;
+    press_key(&mut ed, KeyCode::Char('v')).await;
+    press_key(&mut ed, KeyCode::Esc).await;
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert!(state.comment_anchor.is_none());
+    assert_eq!(state.sub_mode, ReviewSubMode::DiffView);
+}
+
+#[tokio::test]
+async fn review_search_jumps_between_matches_and_esc_clears_it() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().sub_mode,
+        ReviewSubMode::SearchInput
+    );
+    type_keys(&mut ed, "added").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.search_query, "added");
+    assert_eq!(state.cursor_row, 2, "search must jump to the match");
+    assert_eq!(state.search_matches(), vec![2]);
+
+    // n / N wrap around while a search is active.
+    press_key(&mut ed, KeyCode::Char('n')).await;
+    assert_eq!(ed.engine.review_state.as_ref().unwrap().cursor_row, 2);
+    press_key(&mut ed, KeyCode::Char('N')).await;
+    assert_eq!(ed.engine.review_state.as_ref().unwrap().cursor_row, 2);
+
+    // First Esc clears the search, second returns to the file list.
+    press_key(&mut ed, KeyCode::Esc).await;
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert!(state.search_query.is_empty());
+    assert_eq!(state.sub_mode, ReviewSubMode::DiffView);
+
+    press_key(&mut ed, KeyCode::Esc).await;
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().sub_mode,
+        ReviewSubMode::FileList
+    );
+}
+
+#[tokio::test]
+async fn review_search_is_smart_case() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    ed.engine.review_state.as_mut().unwrap().search_query = "ADDED".to_string();
+    assert!(ed
+        .engine
+        .review_state
+        .as_ref()
+        .unwrap()
+        .search_matches()
+        .is_empty());
+
+    ed.engine.review_state.as_mut().unwrap().search_query = "ADDED".to_lowercase();
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().search_matches(),
+        vec![2]
+    );
+}
+
+#[tokio::test]
+async fn review_file_filter_limits_navigation_and_esc_clears_it() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(
+        &mut ed,
+        vec![
+            review_file("src/a.rs"),
+            review_file("src/b.rs"),
+            review_file("src/c.rs"),
+        ],
+    );
+    ed.engine.review_state.as_mut().unwrap().sub_mode = ReviewSubMode::FileList;
+
+    press_key(&mut ed, KeyCode::Char('/')).await;
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().sub_mode,
+        ReviewSubMode::FilterInput
+    );
+    type_keys(&mut ed, "b.rs").await;
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.sub_mode, ReviewSubMode::FileList);
+    assert_eq!(state.file_filter, "b.rs");
+    assert_eq!(state.filtered_file_indices(), vec![1]);
+    assert_eq!(state.selected_file, 1);
+
+    // j cannot leave the filtered set.
+    press_key(&mut ed, KeyCode::Char('j')).await;
+    assert_eq!(ed.engine.review_state.as_ref().unwrap().selected_file, 1);
+
+    // Esc clears the filter first, then exits review.
+    press_key(&mut ed, KeyCode::Esc).await;
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert!(state.file_filter.is_empty());
+    assert_eq!(state.sub_mode, ReviewSubMode::FileList);
+
+    press_key(&mut ed, KeyCode::Esc).await;
+    assert!(ed.engine.review_state.is_none());
+}
+
+fn git_in(root: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+#[tokio::test]
+async fn review_file_keys_stage_unstage_and_discard() {
+    let root = std::env::temp_dir().join(format!("ijevim-review-keys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    git_in(&root, &["init", "-q"]);
+    git_in(&root, &["config", "user.email", "test@example.com"]);
+    git_in(&root, &["config", "user.name", "Test"]);
+    git_in(&root, &["config", "core.autocrlf", "false"]);
+    std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+    git_in(&root, &["add", "-A"]);
+    git_in(&root, &["commit", "-qm", "init"]);
+    std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("tracked.txt")]);
+    ed.engine.review_state.as_mut().unwrap().project_root = Some(root.clone());
+
+    press_key(&mut ed, KeyCode::Char('S')).await;
+    assert!(git_in(&root, &["diff", "--cached"]).contains("+two"));
+
+    press_key(&mut ed, KeyCode::Char('U')).await;
+    assert!(!git_in(&root, &["diff", "--cached"]).contains("+two"));
+
+    press_key(&mut ed, KeyCode::Char('X')).await;
+    assert!(ed.engine.state.has_confirmation());
+    press_key(&mut ed, KeyCode::Char('y')).await;
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(ed.engine.review_state.as_ref().unwrap().files.is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ── :substitute ranges and replacement syntax (B19) ─────────────────
 
 #[tokio::test]

@@ -12,8 +12,55 @@ pub enum ReviewSubMode {
     Preview,
     /// Writing a comment (mini-buffer style)
     CommentInput,
+    /// Browsing all annotations for the review
+    Annotations,
+    /// Typing a diff search pattern
+    SearchInput,
+    /// Typing a file-list filter
+    FilterInput,
     /// Keybinding help
     Help,
+}
+
+/// A single row in the flattened diff view.
+///
+/// This is the shared navigation model used by both the keymap and the
+/// renderer so that "the current line" means the same thing everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffRowKind {
+    HunkHeader,
+    Add,
+    Delete,
+    Context,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffRow {
+    /// Index of the owning hunk in the current file.
+    pub hunk_index: usize,
+    /// Index of the owning line inside the hunk (`None` for hunk headers).
+    pub line_index: Option<usize>,
+    pub kind: DiffRowKind,
+    pub old_lineno: Option<usize>,
+    pub new_lineno: Option<usize>,
+    pub content: String,
+    pub staged: bool,
+}
+
+impl DiffRow {
+    /// Line number an annotation on this row should be attached to.
+    pub fn comment_line(&self) -> Option<usize> {
+        self.new_lineno.or(self.old_lineno)
+    }
+}
+
+/// The line an in-progress comment will be attached to.
+#[derive(Debug, Clone)]
+pub struct CommentTarget {
+    pub file_path: String,
+    pub line: usize,
+    /// Last line of a multi-line comment (`None` for a single line).
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +103,8 @@ pub struct DiffLine {
     pub content: String,
     pub old_lineno: Option<usize>,
     pub new_lineno: Option<usize>,
+    /// The source diff had `\ No newline at end of file` after this line.
+    pub no_newline: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +127,20 @@ pub struct DiffFile {
     pub hunks: Vec<Hunk>,
 }
 
+impl DiffFile {
+    /// Path a human should see (and annotations are keyed by).
+    ///
+    /// Deleted files have no new path, so fall back to the old path instead of
+    /// showing `/dev/null`.
+    pub fn display_path(&self) -> &str {
+        if self.new_path == "/dev/null" || self.new_path.is_empty() {
+            &self.old_path
+        } else {
+            &self.new_path
+        }
+    }
+}
+
 // ── Annotation / Comment ─────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -85,9 +148,32 @@ pub struct Annotation {
     pub id: String,
     pub file_path: String,
     pub line: usize,
+    /// Last line of a multi-line comment (`None` for single-line, v1 files).
+    pub end_line: Option<usize>,
     pub text: String,
     pub resolved: bool,
     pub created_at: String,
+}
+
+/// Smart-case substring match used by review search.
+fn row_matches(content: &str, query: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        content.to_lowercase().contains(&query.to_lowercase())
+    } else {
+        content.contains(query)
+    }
+}
+
+impl Annotation {
+    /// Last line covered by this annotation.
+    pub fn last_line(&self) -> usize {
+        self.end_line.unwrap_or(self.line).max(self.line)
+    }
+
+    /// Whether this annotation covers a given file line.
+    pub fn covers_line(&self, line: usize) -> bool {
+        (self.line..=self.last_line()).contains(&line)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -178,12 +264,34 @@ pub struct ReviewState {
     pub selected_hunk: usize,
     /// Current sub-mode
     pub sub_mode: ReviewSubMode,
+    /// Selected row in the flattened diff view.
+    pub cursor_row: usize,
+    /// Selected annotation index in the annotation browser.
+    pub annotation_selected: usize,
+    /// `d` was pressed once in the annotation browser; the next `d` deletes.
+    pub annotation_pending_delete: bool,
+    /// File path awaiting discard confirmation (`X`).
+    pub pending_discard: Option<String>,
+    /// Target of an in-progress comment.
+    pub comment_target: Option<CommentTarget>,
+    /// Row where visual line selection started (DiffView).
+    pub comment_anchor: Option<usize>,
+    /// Active diff search pattern (`n` / `N`).
+    pub search_query: String,
+    /// Buffer for the search / filter prompt.
+    pub search_buffer: String,
+    /// Cursor position inside `search_buffer`.
+    pub search_cursor: usize,
+    /// Active file-list filter (case-insensitive substring of the path).
+    pub file_filter: String,
     /// User annotations
     pub annotations: Vec<Annotation>,
     /// Review comments
     pub comments: Vec<Comment>,
     /// Scroll position
     pub scroll: ScrollState,
+    /// Number of visible rows in the diff panel (updated by the editor).
+    pub viewport_height: usize,
     /// Diff display style
     pub diff_style: DiffStyle,
     /// Width of the file list panel (in characters)
@@ -221,5 +329,225 @@ impl ReviewState {
     pub fn current_hunk(&self) -> Option<&Hunk> {
         self.current_file()
             .and_then(|f| f.hunks.get(self.selected_hunk))
+    }
+
+    // ── Flattened row navigation ────────────────────────────────────
+
+    /// Flattened rows for the currently selected file.
+    pub fn current_rows(&self) -> Vec<DiffRow> {
+        match self.current_file() {
+            Some(file) => crate::review::rows::file_rows(file),
+            None => Vec::new(),
+        }
+    }
+
+    /// Flattened rows for a file by index.
+    pub fn rows_for(&self, file_index: usize) -> Vec<DiffRow> {
+        match self.files.get(file_index) {
+            Some(file) => crate::review::rows::file_rows(file),
+            None => Vec::new(),
+        }
+    }
+
+    /// The row under the cursor.
+    pub fn current_row(&self) -> Option<DiffRow> {
+        self.current_rows().into_iter().nth(self.cursor_row)
+    }
+
+    /// The file line an annotation placed at the cursor would target.
+    pub fn current_line(&self) -> Option<usize> {
+        self.current_row().and_then(|row| row.comment_line())
+    }
+
+    /// Select a file and reset the cursor / scroll position.
+    pub fn select_file(&mut self, index: usize) {
+        if index >= self.files.len() {
+            return;
+        }
+        self.selected_file = index;
+        self.selected_hunk = 0;
+        self.cursor_row = 0;
+        self.scroll.scroll_top = 0;
+        self.comment_anchor = None;
+    }
+
+    // ── Visual line selection for multi-line comments ───────────────
+
+    /// Start a visual line selection at the current row.
+    pub fn begin_comment_selection(&mut self) {
+        self.comment_anchor = Some(self.cursor_row);
+    }
+
+    /// Clear the visual line selection.
+    pub fn clear_comment_selection(&mut self) {
+        self.comment_anchor = None;
+    }
+
+    /// Inclusive row range covered by the visual selection.
+    pub fn selection_rows(&self) -> Option<(usize, usize)> {
+        let anchor = self.comment_anchor?;
+        let len = self.current_rows().len();
+        if len == 0 {
+            return None;
+        }
+        let cursor = self.cursor_row.min(len - 1);
+        let anchor = anchor.min(len - 1);
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    /// Whether a flattened row is inside the visual selection.
+    pub fn is_row_selected(&self, row: usize) -> bool {
+        self.selection_rows()
+            .is_some_and(|(start, end)| (start..=end).contains(&row))
+    }
+
+    /// File line range covered by the visual selection.
+    ///
+    /// Hunk-header rows have no line number; they are skipped when looking for
+    /// the range endpoints.
+    pub fn selection_lines(&self) -> Option<(usize, usize)> {
+        let (start_row, end_row) = self.selection_rows()?;
+        let rows = self.current_rows();
+        let slice = rows.get(start_row..=end_row)?;
+        let start = slice.iter().find_map(|row| row.comment_line())?;
+        let end = slice.iter().rev().find_map(|row| row.comment_line())?;
+        Some((start.min(end), start.max(end)))
+    }
+
+    /// Move the cursor by `delta` rows, clamping at the ends and keeping the
+    /// owning hunk in sync for staging commands.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let total = self.current_rows().len();
+        if total == 0 {
+            self.cursor_row = 0;
+            self.ensure_cursor_visible();
+            return;
+        }
+
+        let next = if delta < 0 {
+            self.cursor_row.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.cursor_row
+                .saturating_add(delta as usize)
+                .min(total - 1)
+        };
+        self.set_cursor_row(next);
+    }
+
+    /// Set the cursor to an absolute row and keep dependent state in sync.
+    pub fn set_cursor_row(&mut self, row: usize) {
+        let rows = self.current_rows();
+        if rows.is_empty() {
+            self.cursor_row = 0;
+            self.ensure_cursor_visible();
+            return;
+        }
+        self.cursor_row = row.min(rows.len() - 1);
+        if let Some(current) = rows.get(self.cursor_row) {
+            self.selected_hunk = current.hunk_index;
+        }
+        self.ensure_cursor_visible();
+    }
+
+    /// Scroll so the cursor row is visible inside the diff panel.
+    pub fn ensure_cursor_visible(&mut self) {
+        let visible = self.viewport_height.max(1);
+        let cursor = self.cursor_row;
+        if cursor < self.scroll.scroll_top {
+            self.scroll.scroll_top = cursor;
+        } else if cursor >= self.scroll.scroll_top.saturating_add(visible) {
+            self.scroll.scroll_top = cursor + 1 - visible;
+        }
+    }
+
+    // ── Search / filtering ──────────────────────────────────────────
+
+    /// Row indices in the current file matching the active search query.
+    ///
+    /// Uses smart case: an all-lowercase query is case-insensitive, otherwise
+    /// the search is case-sensitive.
+    pub fn search_matches(&self) -> Vec<usize> {
+        if self.search_query.is_empty() {
+            return Vec::new();
+        }
+        let insensitive = !self.search_query.chars().any(|ch| ch.is_uppercase());
+        self.current_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row_matches(&row.content, &self.search_query, insensitive))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Jump to the next/previous search match, wrapping around.
+    pub fn jump_search(&mut self, forward: bool) -> bool {
+        let matches = self.search_matches();
+        if matches.is_empty() {
+            return false;
+        }
+        let target = if forward {
+            matches
+                .iter()
+                .copied()
+                .find(|&row| row > self.cursor_row)
+                .unwrap_or(matches[0])
+        } else {
+            matches
+                .iter()
+                .copied()
+                .rev()
+                .find(|&row| row < self.cursor_row)
+                .unwrap_or(*matches.last().unwrap())
+        };
+        self.set_cursor_row(target);
+        true
+    }
+
+    /// File indices visible under the active filter.
+    pub fn filtered_file_indices(&self) -> Vec<usize> {
+        if self.file_filter.is_empty() {
+            return (0..self.files.len()).collect();
+        }
+        let needle = self.file_filter.to_lowercase();
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.display_path().to_lowercase().contains(&needle))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Select the first visible file if the current selection is filtered out.
+    pub fn ensure_selected_file_visible(&mut self) {
+        let visible = self.filtered_file_indices();
+        if visible.is_empty() {
+            return;
+        }
+        if !visible.contains(&self.selected_file) {
+            self.select_file(visible[0]);
+        }
+    }
+
+    /// Jump the cursor to the next/previous hunk header.
+    pub fn jump_hunk(&mut self, forward: bool) {
+        let rows = self.current_rows();
+        let target = if forward {
+            crate::review::rows::next_hunk_row(&rows, self.cursor_row)
+        } else {
+            crate::review::rows::prev_hunk_row(&rows, self.cursor_row)
+        };
+        if let Some(row) = target {
+            self.set_cursor_row(row);
+        }
+    }
+
+    /// Select the given annotation in the browser, clamping the index.
+    pub fn select_annotation(&mut self, index: usize) {
+        if self.annotations.is_empty() {
+            self.annotation_selected = 0;
+        } else {
+            self.annotation_selected = index.min(self.annotations.len() - 1);
+        }
+        self.annotation_pending_delete = false;
     }
 }

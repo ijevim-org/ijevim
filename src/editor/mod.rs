@@ -240,6 +240,7 @@ impl Editor {
             self.engine.update_window_layout(rows, cols);
         }
 
+        self.update_review_viewport();
         if let Err(e) = self.renderer.render(
             &mut self.terminal,
             &self.engine.buffer,
@@ -390,6 +391,7 @@ impl Editor {
             }
 
             if self.needs_render {
+                self.update_review_viewport();
                 if let Err(e) = self.renderer.render(
                     &mut self.terminal,
                     &self.engine.buffer,
@@ -523,6 +525,50 @@ impl Editor {
         self.history_draft.clear();
         self.engine.state.command_hint = None;
 
+        self.needs_render = true;
+    }
+
+    /// Keep the diff panel height available to review navigation.
+    ///
+    /// One row is the status bar and two are the unified file header, so the
+    /// navigation model works with a conservative visible height.
+    fn update_review_viewport(&mut self) {
+        if let Some(review) = &mut self.engine.review_state {
+            review.viewport_height = self.terminal.rows().saturating_sub(3) as usize;
+        }
+    }
+
+    /// Discard the file stored in `ReviewState::pending_discard`, then reload.
+    pub(crate) fn review_discard_pending(&mut self) {
+        let message = {
+            let Some(state) = &mut self.engine.review_state else {
+                return;
+            };
+            let Some(path) = state.pending_discard.take() else {
+                return;
+            };
+            let Some(root) = state.project_root.clone() else {
+                return;
+            };
+            let Some(file) = state
+                .files
+                .iter()
+                .find(|file| file.display_path() == path)
+                .cloned()
+            else {
+                return;
+            };
+
+            match crate::review::diff::discard_file(&file, &root) {
+                Ok(()) => match crate::review::diff::reload(state) {
+                    Ok(()) => format!("review: discarded {}", path),
+                    Err(err) => format!("review: discarded {} (reload failed: {})", path, err),
+                },
+                Err(err) => format!("review: {}", err),
+            }
+        };
+
+        self.engine.state.set_message(message);
         self.needs_render = true;
     }
 

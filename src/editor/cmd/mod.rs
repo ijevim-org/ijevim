@@ -511,6 +511,13 @@ impl Editor {
                     self.reload_file().await;
                 }
             }
+            ConfirmAction::ReviewDiscard => {
+                if should_quit {
+                    self.review_discard_pending();
+                } else if let Some(state) = &mut self.engine.review_state {
+                    state.pending_discard = None;
+                }
+            }
         }
     }
 }
