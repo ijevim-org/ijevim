@@ -2374,6 +2374,7 @@ async fn review_file_keys_stage_unstage_and_discard() {
     git_in(&root, &["init", "-q"]);
     git_in(&root, &["config", "user.email", "test@example.com"]);
     git_in(&root, &["config", "user.name", "Test"]);
+    git_in(&root, &["config", "core.autocrlf", "false"]);
     std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
     git_in(&root, &["add", "-A"]);
     git_in(&root, &["commit", "-qm", "init"]);

@@ -898,6 +898,7 @@ deleted file mode 100644
             repo.git(&["init", "-q"]);
             repo.git(&["config", "user.email", "test@example.com"]);
             repo.git(&["config", "user.name", "Test"]);
+            repo.git(&["config", "core.autocrlf", "false"]);
             repo
         }
 
