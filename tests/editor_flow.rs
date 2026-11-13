@@ -2043,6 +2043,167 @@ async fn review_reports_git_failures_instead_of_mocking() {
     );
 }
 
+use ijevim::review::{
+    annotations as review_annotations, Annotation, DiffFile, DiffLine, DiffLineKind, FileStatus,
+    Hunk, ReviewSubMode, ScrollState,
+};
+
+fn review_file(path: &str) -> DiffFile {
+    DiffFile {
+        status: FileStatus::Modified,
+        old_path: path.to_string(),
+        new_path: path.to_string(),
+        hunks: vec![Hunk {
+            old_start: 1,
+            old_count: 1,
+            new_start: 1,
+            new_count: 2,
+            header: "@@ -1,1 +1,2 @@".to_string(),
+            staged: false,
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "keep".to_string(),
+                    old_lineno: Some(1),
+                    new_lineno: Some(1),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    content: "added".to_string(),
+                    old_lineno: None,
+                    new_lineno: Some(2),
+                },
+            ],
+        }],
+    }
+}
+
+fn install_review_fixture(ed: &mut Editor, files: Vec<DiffFile>) {
+    let state = ed
+        .engine
+        .review_state
+        .as_mut()
+        .expect("review mode must already be active");
+    state.files = files;
+    state.selected_file = 0;
+    state.selected_hunk = 0;
+    state.cursor_row = 0;
+    state.scroll = ScrollState::default();
+    state.viewport_height = 10;
+    state.sub_mode = ReviewSubMode::DiffView;
+    state.annotations.clear();
+    state.project_root = None;
+    state.comment_buffer.clear();
+    state.comment_cursor = 0;
+    state.comment_target = None;
+}
+
+#[tokio::test]
+async fn review_preview_escape_returns_to_diff_view() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+
+    let state = ed.engine.review_state.as_mut().unwrap();
+    state.sub_mode = ReviewSubMode::Preview;
+
+    press_key(&mut ed, KeyCode::Esc).await;
+
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().sub_mode,
+        ReviewSubMode::DiffView,
+        "Esc from preview must return to the diff, not exit review"
+    );
+}
+
+#[tokio::test]
+async fn review_comment_targets_the_cursor_line() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    // Rows: 0 = hunk header, 1 = context (line 1), 2 = added (line 2).
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 2;
+
+    press_key(&mut ed, KeyCode::Char('c')).await;
+    type_keys(&mut ed, "needs tests").await;
+    ed.handle_key_for_test(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.sub_mode, ReviewSubMode::DiffView);
+    assert_eq!(state.annotations.len(), 1);
+    assert_eq!(state.annotations[0].line, 2);
+    assert_eq!(state.annotations[0].file_path, "src/main.rs");
+    assert_eq!(state.annotations[0].text, "needs tests");
+}
+
+#[tokio::test]
+async fn review_comment_persists_and_reloads() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    let root = std::env::temp_dir().join(format!(
+        "ijevim-review-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    ed.engine.review_state.as_mut().unwrap().project_root = Some(root.clone());
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 2;
+
+    press_key(&mut ed, KeyCode::Char('c')).await;
+    type_keys(&mut ed, "persist me").await;
+    ed.handle_key_for_test(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    let loaded = review_annotations::load_annotations(&root);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].line, 2);
+    assert_eq!(loaded[0].text, "persist me");
+
+    // A fresh review state shows the stored annotation again.
+    ed.engine.review_state.as_mut().unwrap().annotations = loaded;
+    assert_eq!(
+        ed.engine.review_state.as_ref().unwrap().annotations.len(),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn review_annotation_browser_jumps_to_the_right_file_and_line() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(
+        &mut ed,
+        vec![review_file("src/a.rs"), review_file("src/b.rs")],
+    );
+
+    let state = ed.engine.review_state.as_mut().unwrap();
+    state.annotations = vec![Annotation {
+        id: "ann-test".to_string(),
+        file_path: "src/b.rs".to_string(),
+        line: 2,
+        end_line: None,
+        text: "look here".to_string(),
+        resolved: false,
+        created_at: "2026-11-13T00:00:00Z".to_string(),
+    }];
+    state.sub_mode = ReviewSubMode::Annotations;
+    state.annotation_selected = 0;
+
+    press_key(&mut ed, KeyCode::Enter).await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.sub_mode, ReviewSubMode::DiffView);
+    assert_eq!(state.selected_file, 1);
+    assert_eq!(state.current_line(), Some(2));
+}
+
 // ── :substitute ranges and replacement syntax (B19) ─────────────────
 
 #[tokio::test]

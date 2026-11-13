@@ -3,6 +3,7 @@
 //! This module handles running `git diff` and parsing unified diff output
 //! into structured [`DiffFile`] / [`Hunk`] / [`DiffLine`] data.
 
+use crate::review::annotations;
 use crate::review::state::{
     DiffFile, DiffLine, DiffLineKind, FileStatus, Hunk, ReviewArgs, ReviewState,
 };
@@ -24,6 +25,7 @@ pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
         ijevim_core::git::find_root().ok_or_else(|| "not inside a git repository".to_string())?;
     let diff_output = run_git_diff(args)?;
     let files = parse_unified_diff(&diff_output);
+    let annotations = annotations::load_annotations(&project_root);
 
     Ok(ReviewState {
         args: args.clone(),
@@ -31,9 +33,14 @@ pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
         selected_file: 0,
         selected_hunk: 0,
         sub_mode: crate::review::ReviewSubMode::FileList,
-        annotations: Vec::new(),
+        cursor_row: 0,
+        annotation_selected: 0,
+        annotation_pending_delete: false,
+        comment_target: None,
+        annotations,
         comments: Vec::new(),
         scroll: crate::review::ScrollState::default(),
+        viewport_height: 20,
         diff_style: crate::review::DiffStyle::Unified,
         file_list_width: 30,
         project_root: Some(project_root),

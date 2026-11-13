@@ -240,6 +240,7 @@ impl Editor {
             self.engine.update_window_layout(rows, cols);
         }
 
+        self.update_review_viewport();
         if let Err(e) = self.renderer.render(
             &mut self.terminal,
             &self.engine.buffer,
@@ -390,6 +391,7 @@ impl Editor {
             }
 
             if self.needs_render {
+                self.update_review_viewport();
                 if let Err(e) = self.renderer.render(
                     &mut self.terminal,
                     &self.engine.buffer,
@@ -524,6 +526,16 @@ impl Editor {
         self.engine.state.command_hint = None;
 
         self.needs_render = true;
+    }
+
+    /// Keep the diff panel height available to review navigation.
+    ///
+    /// One row is the status bar and two are the unified file header, so the
+    /// navigation model works with a conservative visible height.
+    fn update_review_viewport(&mut self) {
+        if let Some(review) = &mut self.engine.review_state {
+            review.viewport_height = self.terminal.rows().saturating_sub(3) as usize;
+        }
     }
 
     /// Enter review mode with the given arguments.

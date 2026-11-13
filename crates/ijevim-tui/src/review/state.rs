@@ -43,6 +43,13 @@ pub struct DiffRow {
     pub staged: bool,
 }
 
+impl DiffRow {
+    /// Line number an annotation on this row should be attached to.
+    pub fn comment_line(&self) -> Option<usize> {
+        self.new_lineno.or(self.old_lineno)
+    }
+}
+
 /// The line an in-progress comment will be attached to.
 #[derive(Debug, Clone)]
 pub struct CommentTarget {
@@ -112,6 +119,20 @@ pub struct DiffFile {
     pub hunks: Vec<Hunk>,
 }
 
+impl DiffFile {
+    /// Path a human should see (and annotations are keyed by).
+    ///
+    /// Deleted files have no new path, so fall back to the old path instead of
+    /// showing `/dev/null`.
+    pub fn display_path(&self) -> &str {
+        if self.new_path == "/dev/null" || self.new_path.is_empty() {
+            &self.old_path
+        } else {
+            &self.new_path
+        }
+    }
+}
+
 // ── Annotation / Comment ─────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -119,6 +140,8 @@ pub struct Annotation {
     pub id: String,
     pub file_path: String,
     pub line: usize,
+    /// Last line of a multi-line comment (`None` for single-line, v1 files).
+    pub end_line: Option<usize>,
     pub text: String,
     pub resolved: bool,
     pub created_at: String,
@@ -216,6 +239,8 @@ pub struct ReviewState {
     pub cursor_row: usize,
     /// Selected annotation index in the annotation browser.
     pub annotation_selected: usize,
+    /// `d` was pressed once in the annotation browser; the next `d` deletes.
+    pub annotation_pending_delete: bool,
     /// Target of an in-progress comment.
     pub comment_target: Option<CommentTarget>,
     /// User annotations
@@ -224,6 +249,8 @@ pub struct ReviewState {
     pub comments: Vec<Comment>,
     /// Scroll position
     pub scroll: ScrollState,
+    /// Number of visible rows in the diff panel (updated by the editor).
+    pub viewport_height: usize,
     /// Diff display style
     pub diff_style: DiffStyle,
     /// Width of the file list panel (in characters)
@@ -261,5 +288,113 @@ impl ReviewState {
     pub fn current_hunk(&self) -> Option<&Hunk> {
         self.current_file()
             .and_then(|f| f.hunks.get(self.selected_hunk))
+    }
+
+    // ── Flattened row navigation ────────────────────────────────────
+
+    /// Flattened rows for the currently selected file.
+    pub fn current_rows(&self) -> Vec<DiffRow> {
+        match self.current_file() {
+            Some(file) => crate::review::rows::file_rows(file),
+            None => Vec::new(),
+        }
+    }
+
+    /// Flattened rows for a file by index.
+    pub fn rows_for(&self, file_index: usize) -> Vec<DiffRow> {
+        match self.files.get(file_index) {
+            Some(file) => crate::review::rows::file_rows(file),
+            None => Vec::new(),
+        }
+    }
+
+    /// The row under the cursor.
+    pub fn current_row(&self) -> Option<DiffRow> {
+        self.current_rows().into_iter().nth(self.cursor_row)
+    }
+
+    /// The file line an annotation placed at the cursor would target.
+    pub fn current_line(&self) -> Option<usize> {
+        self.current_row().and_then(|row| row.comment_line())
+    }
+
+    /// Select a file and reset the cursor / scroll position.
+    pub fn select_file(&mut self, index: usize) {
+        if index >= self.files.len() {
+            return;
+        }
+        self.selected_file = index;
+        self.selected_hunk = 0;
+        self.cursor_row = 0;
+        self.scroll.scroll_top = 0;
+    }
+
+    /// Move the cursor by `delta` rows, clamping at the ends and keeping the
+    /// owning hunk in sync for staging commands.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let total = self.current_rows().len();
+        if total == 0 {
+            self.cursor_row = 0;
+            self.ensure_cursor_visible();
+            return;
+        }
+
+        let next = if delta < 0 {
+            self.cursor_row.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.cursor_row
+                .saturating_add(delta as usize)
+                .min(total - 1)
+        };
+        self.set_cursor_row(next);
+    }
+
+    /// Set the cursor to an absolute row and keep dependent state in sync.
+    pub fn set_cursor_row(&mut self, row: usize) {
+        let rows = self.current_rows();
+        if rows.is_empty() {
+            self.cursor_row = 0;
+            self.ensure_cursor_visible();
+            return;
+        }
+        self.cursor_row = row.min(rows.len() - 1);
+        if let Some(current) = rows.get(self.cursor_row) {
+            self.selected_hunk = current.hunk_index;
+        }
+        self.ensure_cursor_visible();
+    }
+
+    /// Scroll so the cursor row is visible inside the diff panel.
+    pub fn ensure_cursor_visible(&mut self) {
+        let visible = self.viewport_height.max(1);
+        let cursor = self.cursor_row;
+        if cursor < self.scroll.scroll_top {
+            self.scroll.scroll_top = cursor;
+        } else if cursor >= self.scroll.scroll_top.saturating_add(visible) {
+            self.scroll.scroll_top = cursor + 1 - visible;
+        }
+    }
+
+    /// Jump the cursor to the next/previous hunk header.
+    pub fn jump_hunk(&mut self, forward: bool) {
+        let rows = self.current_rows();
+        let target = if forward {
+            crate::review::rows::next_hunk_row(&rows, self.cursor_row)
+        } else {
+            crate::review::rows::prev_hunk_row(&rows, self.cursor_row)
+        };
+        if let Some(row) = target {
+            self.set_cursor_row(row);
+        }
+    }
+
+    /// Select the given annotation in the browser, clamping the index.
+    pub fn select_annotation(&mut self, index: usize) {
+        if self.annotations.is_empty() {
+            self.annotation_selected = 0;
+        } else {
+            self.annotation_selected = index.min(self.annotations.len() - 1);
+        }
+        self.annotation_pending_delete = false;
     }
 }
