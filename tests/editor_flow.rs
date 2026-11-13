@@ -2206,6 +2206,48 @@ async fn review_annotation_browser_jumps_to_the_right_file_and_line() {
     assert_eq!(state.current_line(), Some(2));
 }
 
+#[tokio::test]
+async fn review_visual_selection_creates_a_multiline_annotation() {
+    let mut ed = test_vim_editor("abc\n");
+    run_command(&mut ed, "review").await;
+    install_review_fixture(&mut ed, vec![review_file("src/main.rs")]);
+
+    // Rows: 0 = hunk header, 1 = context line 1, 2 = added line 2.
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 1;
+    press_key(&mut ed, KeyCode::Char('v')).await;
+    press_key(&mut ed, KeyCode::Char('j')).await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.selection_lines(), Some((1, 2)));
+    assert!(state.is_row_selected(1));
+    assert!(state.is_row_selected(2));
+
+    press_key(&mut ed, KeyCode::Char('c')).await;
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert_eq!(state.sub_mode, ReviewSubMode::CommentInput);
+    assert_eq!(state.comment_target.as_ref().unwrap().line, 1);
+    assert_eq!(state.comment_target.as_ref().unwrap().end_line, Some(2));
+
+    type_keys(&mut ed, "range comment").await;
+    ed.handle_key_for_test(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    let state = ed.engine.review_state.as_ref().unwrap();
+    let annotation = state.annotations.last().unwrap();
+    assert_eq!(annotation.line, 1);
+    assert_eq!(annotation.end_line, Some(2));
+    assert!(state.comment_anchor.is_none());
+
+    // Esc clears an active visual selection instead of leaving the diff.
+    ed.engine.review_state.as_mut().unwrap().sub_mode = ReviewSubMode::DiffView;
+    ed.engine.review_state.as_mut().unwrap().cursor_row = 1;
+    press_key(&mut ed, KeyCode::Char('v')).await;
+    press_key(&mut ed, KeyCode::Esc).await;
+    let state = ed.engine.review_state.as_ref().unwrap();
+    assert!(state.comment_anchor.is_none());
+    assert_eq!(state.sub_mode, ReviewSubMode::DiffView);
+}
+
 fn git_in(root: &std::path::Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")

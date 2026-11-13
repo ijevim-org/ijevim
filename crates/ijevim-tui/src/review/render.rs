@@ -25,6 +25,8 @@ const DEL_FG: Color = Color::AnsiValue(9);
 const HUNK_HEADER_FG: Color = Color::AnsiValue(33);
 /// Selected file/hunk highlight
 const SELECTED_BG: Color = Color::AnsiValue(236);
+/// Visual line selection (multi-line comment range)
+const SELECTION_BG: Color = Color::AnsiValue(24);
 /// Status bar background
 const STATUS_BG: Color = Color::AnsiValue(236);
 /// Mode indicator background (blue)
@@ -328,6 +330,7 @@ fn render_unified_diff(
             &rect,
             dl,
             idx == review.cursor_row,
+            review.is_row_selected(idx),
             lineno_width,
             counts
                 .get(&dl.comment_line().unwrap_or(0))
@@ -337,12 +340,14 @@ fn render_unified_diff(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_unified_row(
     screen: &mut ScreenBuffer,
     row: usize,
     rect: &PanelRect,
     dl: &DiffRow,
     is_cursor: bool,
+    is_selected: bool,
     lineno_width: usize,
     annotation_count: usize,
 ) {
@@ -358,7 +363,13 @@ fn render_unified_row(
                 } else {
                     HUNK_HEADER_FG
                 },
-                bg: if is_cursor { SELECTED_BG } else { Color::Reset },
+                bg: if is_cursor {
+                    SELECTED_BG
+                } else if is_selected {
+                    SELECTION_BG
+                } else {
+                    Color::Reset
+                },
                 bold: true,
                 ..CellStyle::default()
             };
@@ -378,7 +389,13 @@ fn render_unified_row(
                 DiffRowKind::Delete => ('-', DEL_BG, DEL_SEL_BG, DEL_FG),
                 _ => (' ', Color::Reset, SELECTED_BG, Color::Reset),
             };
-            let bg = if is_cursor { sel_bg } else { normal_bg };
+            let bg = if is_cursor {
+                sel_bg
+            } else if is_selected {
+                SELECTION_BG
+            } else {
+                normal_bg
+            };
 
             let old = format_lineno(dl.old_lineno, lineno_width);
             let new = format_lineno(dl.new_lineno, lineno_width);
@@ -518,6 +535,7 @@ fn render_side_by_side_diff(
         };
         let row = rect.row_start + 1 + i;
         let is_cursor = idx == review.cursor_row;
+        let is_selected = review.is_row_selected(idx);
         let count = counts
             .get(&dl.comment_line().unwrap_or(0))
             .copied()
@@ -535,11 +553,35 @@ fn render_side_by_side_diff(
                     Some(h) => format!("{}@@ +{},{} @@", staged, h.new_start, h.new_count),
                     None => dl.content.clone(),
                 };
-                render_side_header(screen, row, &left_rect, &left, is_cursor, count);
-                render_side_header(screen, row, &right_rect, &right, is_cursor, count);
+                render_side_header(
+                    screen,
+                    row,
+                    &left_rect,
+                    &left,
+                    is_cursor,
+                    is_selected,
+                    count,
+                );
+                render_side_header(
+                    screen,
+                    row,
+                    &right_rect,
+                    &right,
+                    is_cursor,
+                    is_selected,
+                    count,
+                );
             }
             DiffRowKind::Add => {
-                render_side_blank(screen, row, &left_rect, Color::Reset, is_cursor, false);
+                render_side_blank(
+                    screen,
+                    row,
+                    &left_rect,
+                    Color::Reset,
+                    is_cursor,
+                    is_selected,
+                    false,
+                );
                 render_side_content(
                     screen,
                     row,
@@ -550,6 +592,7 @@ fn render_side_by_side_diff(
                     ADD_SEL_BG,
                     ADD_FG,
                     is_cursor,
+                    is_selected,
                     lineno_width,
                     count,
                     true,
@@ -566,11 +609,20 @@ fn render_side_by_side_diff(
                     DEL_SEL_BG,
                     DEL_FG,
                     is_cursor,
+                    is_selected,
                     lineno_width,
                     count,
                     false,
                 );
-                render_side_blank(screen, row, &right_rect, Color::Reset, is_cursor, true);
+                render_side_blank(
+                    screen,
+                    row,
+                    &right_rect,
+                    Color::Reset,
+                    is_cursor,
+                    is_selected,
+                    true,
+                );
             }
             DiffRowKind::Context => {
                 render_side_content(
@@ -583,6 +635,7 @@ fn render_side_by_side_diff(
                     SELECTED_BG,
                     Color::Reset,
                     is_cursor,
+                    is_selected,
                     lineno_width,
                     count,
                     false,
@@ -597,6 +650,7 @@ fn render_side_by_side_diff(
                     SELECTED_BG,
                     Color::Reset,
                     is_cursor,
+                    is_selected,
                     lineno_width,
                     count,
                     true,
@@ -617,11 +671,18 @@ fn render_side_content(
     sel_bg: Color,
     prefix_fg: Color,
     is_cursor: bool,
+    is_selected: bool,
     lineno_width: usize,
     annotation_count: usize,
     new_side: bool,
 ) {
-    let bg = if is_cursor { sel_bg } else { normal_bg };
+    let bg = if is_cursor {
+        sel_bg
+    } else if is_selected {
+        SELECTION_BG
+    } else {
+        normal_bg
+    };
     let lineno = if new_side {
         dl.new_lineno
     } else {
@@ -705,6 +766,7 @@ fn render_side_header(
     rect: &PanelRect,
     text: &str,
     is_cursor: bool,
+    is_selected: bool,
     annotation_count: usize,
 ) {
     let style = CellStyle {
@@ -713,7 +775,13 @@ fn render_side_header(
         } else {
             HUNK_HEADER_FG
         },
-        bg: if is_cursor { SELECTED_BG } else { Color::Reset },
+        bg: if is_cursor {
+            SELECTED_BG
+        } else if is_selected {
+            SELECTION_BG
+        } else {
+            Color::Reset
+        },
         bold: true,
         ..CellStyle::default()
     };
@@ -734,9 +802,16 @@ fn render_side_blank(
     rect: &PanelRect,
     bg: Color,
     is_cursor: bool,
+    is_selected: bool,
     show_gutter: bool,
 ) {
-    let bg = if is_cursor { SELECTED_BG } else { bg };
+    let bg = if is_cursor {
+        SELECTED_BG
+    } else if is_selected {
+        SELECTION_BG
+    } else {
+        bg
+    };
     let style = CellStyle {
         bg,
         ..CellStyle::default()
@@ -855,7 +930,8 @@ fn render_help_overlay(screen: &mut ScreenBuffer, rows: usize, cols: usize) {
         " ║    U      Unstage file                       ║ ",
         " ║    X      Discard file changes               ║ ",
         " ║    r      Reload diff                        ║ ",
-        " ║    c      Comment on the current line        ║ ",
+        " ║    v      Visual line selection              ║ ",
+        " ║    c      Comment on line/selection          ║ ",
         " ║    a      Browse annotations                 ║ ",
         " ║    o      Open file preview                  ║ ",
         " ║    d      Toggle diff style                  ║ ",
@@ -941,7 +1017,10 @@ fn render_comment_input(
     let target = review
         .comment_target
         .as_ref()
-        .map(|t| format!(" {}:{} ", t.file_path, t.line))
+        .map(|t| match t.end_line {
+            Some(end) if end != t.line => format!(" {}:{}-{} ", t.file_path, t.line, end),
+            _ => format!(" {}:{} ", t.file_path, t.line),
+        })
         .unwrap_or_else(|| " comment ".to_string());
 
     let lines: Vec<&str> = review.comment_buffer.split('\n').collect();
@@ -1136,7 +1215,12 @@ fn render_annotations_overlay(
 
         let mark = if ann.resolved { "[x] " } else { "[ ] " };
         let text = ann.text.replace('\n', " ");
-        let line = format!("{}{}:{}  {}", mark, ann.file_path, ann.line, text);
+        let line = match ann.end_line {
+            Some(end) if end != ann.line => {
+                format!("{}{}:{}-{}  {}", mark, ann.file_path, ann.line, end, text)
+            }
+            _ => format!("{}{}:{}  {}", mark, ann.file_path, ann.line, text),
+        };
         let fg = if ann.resolved { DIM_FG } else { Color::White };
         set_string_styled(
             screen,
@@ -1200,6 +1284,7 @@ fn render_status_bar(screen: &mut ScreenBuffer, review: &ReviewState, row: usize
 
     let sub_mode_text = match review.sub_mode {
         ReviewSubMode::FileList => " [files] ",
+        ReviewSubMode::DiffView if review.comment_anchor.is_some() => " [visual] ",
         ReviewSubMode::DiffView => " [diff] ",
         ReviewSubMode::Preview => " [preview] ",
         ReviewSubMode::CommentInput => " [comment] ",
@@ -1367,7 +1452,9 @@ fn annotation_counts(review: &ReviewState, file_path: &str) -> HashMap<usize, us
     let mut counts = HashMap::new();
     for annotation in &review.annotations {
         if annotation.file_path == file_path && !annotation.resolved {
-            *counts.entry(annotation.line).or_insert(0) += 1;
+            for line in annotation.line..=annotation.last_line() {
+                *counts.entry(line).or_insert(0) += 1;
+            }
         }
     }
     counts
@@ -1405,7 +1492,7 @@ fn read_file_lines(review: &ReviewState, file_path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::review::state::{DiffLine, DiffLineKind, Hunk};
+    use crate::review::state::{Annotation, DiffLine, DiffLineKind, Hunk};
 
     fn sample_review() -> ReviewState {
         ReviewState {
@@ -1447,6 +1534,7 @@ mod tests {
             annotation_pending_delete: false,
             pending_discard: None,
             comment_target: None,
+            comment_anchor: None,
             annotations: Vec::new(),
             comments: Vec::new(),
             scroll: crate::review::ScrollState::default(),
@@ -1467,6 +1555,42 @@ mod tests {
         assert_eq!(effective_scroll(&review, 3, 2), 1);
         review.scroll.scroll_top = 99;
         assert_eq!(effective_scroll(&review, 3, 2), 1);
+    }
+
+    #[test]
+    fn visual_selection_is_shown_in_the_status_bar() {
+        let mut review = sample_review();
+        review.cursor_row = 1;
+        review.begin_comment_selection();
+        review.cursor_row = 2;
+
+        let mut screen = ScreenBuffer::new(12, 80);
+        render_review(&mut screen, &review, 12, 80);
+
+        assert!(
+            screen.render().contains("[visual]"),
+            "visual selection indicator missing: {}",
+            screen.render()
+        );
+        assert_eq!(review.selection_lines(), Some((1, 2)));
+    }
+
+    #[test]
+    fn multiline_annotation_marks_every_covered_line() {
+        let mut review = sample_review();
+        review.annotations.push(Annotation {
+            id: "a".to_string(),
+            file_path: "src/main.rs".to_string(),
+            line: 1,
+            end_line: Some(2),
+            text: "range".to_string(),
+            resolved: false,
+            created_at: "2026-11-13T00:00:00Z".to_string(),
+        });
+
+        let counts = annotation_counts(&review, "src/main.rs");
+        assert_eq!(counts.get(&1), Some(&1));
+        assert_eq!(counts.get(&2), Some(&1));
     }
 
     #[test]

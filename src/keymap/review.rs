@@ -75,8 +75,15 @@ fn handle_escape(editor: &mut Editor, sub_mode: ReviewSubMode) {
             editor.exit_review_mode();
             return;
         }
-        ReviewSubMode::Help | ReviewSubMode::DiffView => {
+        ReviewSubMode::Help => {
             state.sub_mode = ReviewSubMode::FileList;
+        }
+        ReviewSubMode::DiffView => {
+            if state.comment_anchor.is_some() {
+                state.clear_comment_selection();
+            } else {
+                state.sub_mode = ReviewSubMode::FileList;
+            }
         }
         ReviewSubMode::Preview | ReviewSubMode::Annotations => {
             state.sub_mode = ReviewSubMode::DiffView;
@@ -85,6 +92,7 @@ fn handle_escape(editor: &mut Editor, sub_mode: ReviewSubMode) {
             state.comment_buffer.clear();
             state.comment_cursor = 0;
             state.comment_target = None;
+            state.clear_comment_selection();
             state.sub_mode = ReviewSubMode::DiffView;
         }
     }
@@ -175,15 +183,23 @@ fn handle_diff_view(editor: &mut Editor, key: KeyCode, modifiers: KeyModifiers) 
             toggle_stage(editor);
         }
         KeyCode::Char('c') => {
-            let target = state.current_row().and_then(|row| {
-                row.comment_line().map(|line| CommentTarget {
-                    file_path: state
-                        .current_file()
-                        .map(|f| f.display_path().to_string())
-                        .unwrap_or_default(),
+            let file_path = state
+                .current_file()
+                .map(|f| f.display_path().to_string())
+                .unwrap_or_default();
+            let target = match state.selection_lines() {
+                Some((start, end)) => Some(CommentTarget {
+                    file_path,
+                    line: start,
+                    end_line: (end > start).then_some(end),
+                }),
+                None => state.current_line().map(|line| CommentTarget {
+                    file_path,
                     line,
-                })
-            });
+                    end_line: None,
+                }),
+            };
+            state.clear_comment_selection();
             match target {
                 Some(target) => {
                     state.comment_target = Some(target);
@@ -210,6 +226,13 @@ fn handle_diff_view(editor: &mut Editor, key: KeyCode, modifiers: KeyModifiers) 
                 DiffStyle::Unified => DiffStyle::SideBySide,
                 DiffStyle::SideBySide => DiffStyle::Unified,
             };
+        }
+        KeyCode::Char('v') => {
+            if state.comment_anchor.is_some() {
+                state.clear_comment_selection();
+            } else {
+                state.begin_comment_selection();
+            }
         }
         KeyCode::Char('S') => action = Some(DiffAction::StageFile),
         KeyCode::Char('U') => action = Some(DiffAction::UnstageFile),
@@ -404,7 +427,7 @@ fn select_annotation_near_cursor(state: &crate::review::ReviewState) -> usize {
     state
         .annotations
         .iter()
-        .position(|a| a.file_path == path && a.line == line)
+        .position(|a| a.file_path == path && a.covers_line(line))
         .unwrap_or(0)
 }
 
@@ -426,6 +449,7 @@ fn jump_to_location(state: &mut crate::review::ReviewState, file_path: &str, lin
         state.comment_target = Some(CommentTarget {
             file_path: line_hint,
             line,
+            end_line: None,
         });
     }
 }
@@ -628,6 +652,7 @@ fn save_comment(editor: &mut Editor) {
         Some(CommentTarget {
             file_path: path,
             line,
+            end_line: None,
         })
     });
 
@@ -643,7 +668,7 @@ fn save_comment(editor: &mut Editor) {
         id: annotations::generate_annotation_id(),
         file_path: target.file_path,
         line: target.line,
-        end_line: None,
+        end_line: target.end_line,
         text,
         resolved: false,
         created_at: annotations::now_iso8601(),
@@ -674,6 +699,7 @@ fn save_comment(editor: &mut Editor) {
     state.comment_buffer.clear();
     state.comment_cursor = 0;
     state.comment_target = None;
+    state.clear_comment_selection();
     state.sub_mode = ReviewSubMode::DiffView;
     editor.needs_render = true;
 }

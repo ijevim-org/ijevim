@@ -41,6 +41,7 @@ pub fn try_get_review_state(args: &ReviewArgs) -> Result<ReviewState, String> {
         annotation_pending_delete: false,
         pending_discard: None,
         comment_target: None,
+        comment_anchor: None,
         annotations,
         comments: Vec::new(),
         scroll: crate::review::ScrollState::default(),

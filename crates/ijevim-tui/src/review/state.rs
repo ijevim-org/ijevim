@@ -55,6 +55,8 @@ impl DiffRow {
 pub struct CommentTarget {
     pub file_path: String,
     pub line: usize,
+    /// Last line of a multi-line comment (`None` for a single line).
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +149,18 @@ pub struct Annotation {
     pub text: String,
     pub resolved: bool,
     pub created_at: String,
+}
+
+impl Annotation {
+    /// Last line covered by this annotation.
+    pub fn last_line(&self) -> usize {
+        self.end_line.unwrap_or(self.line).max(self.line)
+    }
+
+    /// Whether this annotation covers a given file line.
+    pub fn covers_line(&self, line: usize) -> bool {
+        (self.line..=self.last_line()).contains(&line)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +261,8 @@ pub struct ReviewState {
     pub pending_discard: Option<String>,
     /// Target of an in-progress comment.
     pub comment_target: Option<CommentTarget>,
+    /// Row where visual line selection started (DiffView).
+    pub comment_anchor: Option<usize>,
     /// User annotations
     pub annotations: Vec<Annotation>,
     /// Review comments
@@ -331,6 +347,50 @@ impl ReviewState {
         self.selected_hunk = 0;
         self.cursor_row = 0;
         self.scroll.scroll_top = 0;
+        self.comment_anchor = None;
+    }
+
+    // ── Visual line selection for multi-line comments ───────────────
+
+    /// Start a visual line selection at the current row.
+    pub fn begin_comment_selection(&mut self) {
+        self.comment_anchor = Some(self.cursor_row);
+    }
+
+    /// Clear the visual line selection.
+    pub fn clear_comment_selection(&mut self) {
+        self.comment_anchor = None;
+    }
+
+    /// Inclusive row range covered by the visual selection.
+    pub fn selection_rows(&self) -> Option<(usize, usize)> {
+        let anchor = self.comment_anchor?;
+        let len = self.current_rows().len();
+        if len == 0 {
+            return None;
+        }
+        let cursor = self.cursor_row.min(len - 1);
+        let anchor = anchor.min(len - 1);
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    /// Whether a flattened row is inside the visual selection.
+    pub fn is_row_selected(&self, row: usize) -> bool {
+        self.selection_rows()
+            .is_some_and(|(start, end)| (start..=end).contains(&row))
+    }
+
+    /// File line range covered by the visual selection.
+    ///
+    /// Hunk-header rows have no line number; they are skipped when looking for
+    /// the range endpoints.
+    pub fn selection_lines(&self) -> Option<(usize, usize)> {
+        let (start_row, end_row) = self.selection_rows()?;
+        let rows = self.current_rows();
+        let slice = rows.get(start_row..=end_row)?;
+        let start = slice.iter().find_map(|row| row.comment_line())?;
+        let end = slice.iter().rev().find_map(|row| row.comment_line())?;
+        Some((start.min(end), start.max(end)))
     }
 
     /// Move the cursor by `delta` rows, clamping at the ends and keeping the
