@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Review mode (`:review`): browse `git diff` in the TUI with a shared row model,
+  unified/side-by-side rendering, hunk navigation, live file preview, and
+  reload (`r`).
+- Review mode staging: `Enter` stages/unstages a hunk, `S`/`U` stage/unstage a
+  file, and `X` discards a file's changes after confirmation. Staged state is
+  derived from `git diff --cached` instead of an in-memory flag.
+- Review mode comments: annotations in `<git-dir>/ijevim/review/annotations.json`
+  (JSON v2 with `end_line`, legacy `.review/annotations.json` read fallback),
+  line and visual-range comments, annotation browser with jump, resolve toggle
+  and delete.
+- Review mode search and filtering: diff search with smart case and
+  `n`/`N` navigation, plus case-insensitive file-list filtering with `/`.
+- Review mode arguments: `:review --staged` / `--cached`, `:review <rev>`,
+  `:review <rev1>..<rev2>`, and `:review -- <path>`.
 - README: generated dependency tables (runtime / optional / development, with
   versions, licensing and transitive crate counts). Regenerate with
   `scripts/deps-table.sh --write`; CI verifies it via `--check`.
