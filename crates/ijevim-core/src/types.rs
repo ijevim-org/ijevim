@@ -665,6 +665,8 @@ pub enum ConfirmAction {
     QuitDiscard,
     WriteQuitAll,
     ReloadDiscard,
+    /// Discard the review-mode file awaiting confirmation.
+    ReviewDiscard,
 }
 
 #[derive(Clone, Debug)]

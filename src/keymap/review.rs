@@ -143,6 +143,7 @@ fn handle_diff_view(editor: &mut Editor, key: KeyCode, modifiers: KeyModifiers) 
 
     let half_page = (state.viewport_height / 2).max(1) as isize;
     let mut handled = true;
+    let mut action: Option<DiffAction> = None;
 
     match key {
         KeyCode::Char('j') | KeyCode::Down => state.move_cursor(1),
@@ -210,13 +211,92 @@ fn handle_diff_view(editor: &mut Editor, key: KeyCode, modifiers: KeyModifiers) 
                 DiffStyle::SideBySide => DiffStyle::Unified,
             };
         }
+        KeyCode::Char('S') => action = Some(DiffAction::StageFile),
+        KeyCode::Char('U') => action = Some(DiffAction::UnstageFile),
+        KeyCode::Char('X') => action = Some(DiffAction::DiscardFile),
+        KeyCode::Char('r') => action = Some(DiffAction::Reload),
         KeyCode::Char('?') => state.sub_mode = ReviewSubMode::Help,
         _ => handled = false,
+    }
+
+    if let Some(action) = action {
+        perform_diff_action(editor, action);
+        return;
     }
 
     if handled {
         editor.needs_render = true;
     }
+}
+
+#[derive(Clone, Copy)]
+enum DiffAction {
+    StageFile,
+    UnstageFile,
+    DiscardFile,
+    Reload,
+}
+
+fn perform_diff_action(editor: &mut Editor, action: DiffAction) {
+    let message = {
+        let Some(state) = &mut editor.engine.review_state else {
+            return;
+        };
+        let Some(root) = state.project_root.clone() else {
+            editor
+                .engine
+                .state
+                .set_message("review: not inside a git repository");
+            return;
+        };
+
+        if let DiffAction::DiscardFile = action {
+            let Some(file) = state.current_file() else {
+                return;
+            };
+            let path = file.display_path().to_string();
+            state.pending_discard = Some(path.clone());
+            editor.engine.state.set_confirmation(
+                format!("Discard changes in {}?", path),
+                crate::types::ConfirmAction::ReviewDiscard,
+            );
+            editor.needs_render = true;
+            return;
+        }
+
+        let Some(file) = state.current_file().cloned() else {
+            return;
+        };
+
+        let result = match action {
+            DiffAction::StageFile => {
+                crate::review::diff::stage_file(&file, &root).map(|_| "file staged")
+            }
+            DiffAction::UnstageFile => {
+                crate::review::diff::unstage_file(&file, &root).map(|_| "file unstaged")
+            }
+            DiffAction::Reload => crate::review::diff::reload(state).map(|_| "reloaded"),
+            DiffAction::DiscardFile => unreachable!(),
+        };
+
+        match result {
+            Ok(verb) => {
+                if !matches!(action, DiffAction::Reload) {
+                    if let Err(err) = crate::review::diff::reload(state) {
+                        format!("review: {} (reload failed: {})", verb, err)
+                    } else {
+                        format!("review: {}", verb)
+                    }
+                } else {
+                    format!("review: {}", verb)
+                }
+            }
+            Err(err) => format!("review: {}", err),
+        }
+    };
+
+    editor.engine.state.set_message(message);
+    editor.needs_render = true;
 }
 
 fn toggle_stage(editor: &mut Editor) {
@@ -230,48 +310,43 @@ fn toggle_stage(editor: &mut Editor) {
             .map(|row| row.hunk_index)
             .unwrap_or(state.selected_hunk);
 
-        let (file_path, was_staged, has_root) = {
+        let Some(root) = state.project_root.clone() else {
+            editor
+                .engine
+                .state
+                .set_message("review: not inside a git repository");
+            return;
+        };
+
+        let (was_staged, result) = {
             let Some(file) = state.files.get(file_index) else {
                 return;
             };
             let Some(hunk) = file.hunks.get(hunk_index) else {
                 return;
             };
-            (
-                file.display_path().to_string(),
-                hunk.staged,
-                state.project_root.is_some(),
-            )
-        };
-
-        let result = if has_root {
-            let hunk = &state.files[file_index].hunks[hunk_index];
-            if was_staged {
-                crate::review::diff::unstage_hunk(hunk, &file_path)
+            let result = if hunk.staged {
+                crate::review::diff::unstage_hunk(hunk, file, &root)
             } else {
-                crate::review::diff::stage_hunk(hunk, &file_path)
-            }
-        } else {
-            Ok(())
+                crate::review::diff::stage_hunk(hunk, file, &root)
+            };
+            (hunk.staged, result)
         };
 
         match result {
             Ok(()) => {
-                if let Some(hunk) = state
-                    .files
-                    .get_mut(file_index)
-                    .and_then(|f| f.hunks.get_mut(hunk_index))
-                {
-                    hunk.staged = !was_staged;
-                }
                 let verb = if was_staged { "unstaged" } else { "staged" };
-                format!("review: hunk {}", verb)
+                match crate::review::diff::reload(state) {
+                    Ok(()) => format!("review: hunk {}", verb),
+                    Err(err) => format!("review: hunk {} (reload failed: {})", verb, err),
+                }
             }
             Err(err) => format!("review: {}", err),
         }
     };
 
     editor.engine.state.set_message(message);
+    editor.needs_render = true;
 }
 
 /// Next/previous annotation relative to the cursor.

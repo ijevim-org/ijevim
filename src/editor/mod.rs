@@ -538,6 +538,40 @@ impl Editor {
         }
     }
 
+    /// Discard the file stored in `ReviewState::pending_discard`, then reload.
+    pub(crate) fn review_discard_pending(&mut self) {
+        let message = {
+            let Some(state) = &mut self.engine.review_state else {
+                return;
+            };
+            let Some(path) = state.pending_discard.take() else {
+                return;
+            };
+            let Some(root) = state.project_root.clone() else {
+                return;
+            };
+            let Some(file) = state
+                .files
+                .iter()
+                .find(|file| file.display_path() == path)
+                .cloned()
+            else {
+                return;
+            };
+
+            match crate::review::diff::discard_file(&file, &root) {
+                Ok(()) => match crate::review::diff::reload(state) {
+                    Ok(()) => format!("review: discarded {}", path),
+                    Err(err) => format!("review: discarded {} (reload failed: {})", path, err),
+                },
+                Err(err) => format!("review: {}", err),
+            }
+        };
+
+        self.engine.state.set_message(message);
+        self.needs_render = true;
+    }
+
     /// Enter review mode with the given arguments.
     ///
     /// Saves the current keymap so it can be restored on exit, sets up mock

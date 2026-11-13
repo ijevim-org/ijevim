@@ -97,6 +97,8 @@ pub struct DiffLine {
     pub content: String,
     pub old_lineno: Option<usize>,
     pub new_lineno: Option<usize>,
+    /// The source diff had `\ No newline at end of file` after this line.
+    pub no_newline: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +243,8 @@ pub struct ReviewState {
     pub annotation_selected: usize,
     /// `d` was pressed once in the annotation browser; the next `d` deletes.
     pub annotation_pending_delete: bool,
+    /// File path awaiting discard confirmation (`X`).
+    pub pending_discard: Option<String>,
     /// Target of an in-progress comment.
     pub comment_target: Option<CommentTarget>,
     /// User annotations
