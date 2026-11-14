@@ -163,7 +163,7 @@ impl Editor {
             KeyCode::Char('$') => {
                 let count = self.take_count();
                 let target = (self.engine.state.cursor.line + count - 1)
-                    .min(self.engine.buffer.line_count());
+                    .min(self.engine.buffer.content_line_count());
                 self.engine.state.cursor.line = target;
                 self.cursor_line_end();
             }

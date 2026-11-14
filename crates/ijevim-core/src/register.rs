@@ -63,12 +63,19 @@ impl Register {
         let reg = name.to_ascii_lowercase();
 
         // Uppercase register names append (Vim: `"Ayy` appends to register a).
-        let value = if name.is_ascii_uppercase() {
-            let mut merged = self.registers.get(&reg).cloned().unwrap_or_default();
-            merged.push_str(content);
-            merged
+        // The existing kind wins: appending a word to a linewise register must
+        // not turn the whole register charwise.
+        let (value, kind) = if name.is_ascii_uppercase() {
+            match self.registers.get(&reg) {
+                Some(existing) if !existing.is_empty() => {
+                    let merged = format!("{existing}{content}");
+                    let kind = self.kinds.get(&reg).copied().unwrap_or(kind);
+                    (merged, kind)
+                }
+                _ => (content.to_string(), kind),
+            }
         } else {
-            content.to_string()
+            (content.to_string(), kind)
         };
 
         self.registers.insert(reg, value.clone());
@@ -248,5 +255,21 @@ mod tests {
         r.set('"', "");
         r.set('+', "");
         assert_eq!(r.get('"'), "");
+    }
+}
+
+#[cfg(test)]
+mod append_regression_tests {
+    use super::*;
+
+    /// Appending to a linewise register must keep it linewise so `p` still
+    /// pastes whole lines.
+    #[test]
+    fn appending_charwise_to_linewise_keeps_linewise_kind() {
+        let mut reg = Register::new();
+        reg.set_with_kind('a', "one\n", RegisterKind::Line);
+        reg.set_with_kind('A', "two", RegisterKind::Char);
+        assert_eq!(reg.get('a'), "one\ntwo");
+        assert_eq!(reg.kind('a'), RegisterKind::Line);
     }
 }

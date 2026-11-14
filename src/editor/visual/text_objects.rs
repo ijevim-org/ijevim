@@ -22,13 +22,19 @@ impl Editor {
                 };
                 if !word.is_empty() {
                     let chars = self.engine.buffer.line_chars(line);
+                    let content_len = self.engine.buffer.line_content_len(line);
                     let (mut s, mut e) = (start, end);
                     if !inner {
-                        while s > 0 && chars[s - 1].is_whitespace() {
-                            s -= 1;
-                        }
-                        while e < chars.len() && chars[e].is_whitespace() {
+                        // Prefer whitespace after the word; fall back to
+                        // whitespace before it at end of line. Never absorb
+                        // the trailing newline.
+                        while e < content_len && chars[e].is_whitespace() {
                             e += 1;
+                        }
+                        if e == end {
+                            while s > 0 && chars[s - 1].is_whitespace() {
+                                s -= 1;
+                            }
                         }
                     }
                     range = Some((
@@ -43,15 +49,30 @@ impl Editor {
             '"' | '\'' => {
                 let chars = self.engine.buffer.line_chars(line);
                 let mut open = None;
-                for i in (0..col).rev() {
-                    if chars.get(i) == Some(&c) {
-                        open = Some(i);
-                        break;
-                    }
-                }
                 let mut close = None;
-                if let Some(i) = chars.iter().skip(col + 1).position(|&ch| ch == c) {
-                    close = Some(col + 1 + i);
+                if chars.get(col) == Some(&c) {
+                    // Quote parity: even count before the cursor means this
+                    // quote opens the pair, odd means it closes it.
+                    let preceding = chars[..col].iter().filter(|&&ch| ch == c).count();
+                    if preceding % 2 == 0 {
+                        if let Some(i) = (col + 1..chars.len()).find(|&i| chars[i] == c) {
+                            open = Some(col);
+                            close = Some(i);
+                        }
+                    } else if let Some(i) = (0..col).rev().find(|&i| chars[i] == c) {
+                        open = Some(i);
+                        close = Some(col);
+                    }
+                } else {
+                    for i in (0..col).rev() {
+                        if chars.get(i) == Some(&c) {
+                            open = Some(i);
+                            break;
+                        }
+                    }
+                    if let Some(i) = chars.iter().skip(col + 1).position(|&ch| ch == c) {
+                        close = Some(col + 1 + i);
+                    }
                 }
                 if let (Some(o), Some(cl)) = (open, close) {
                     let (s, e) = if inner { (o + 1, cl) } else { (o, cl + 1) };

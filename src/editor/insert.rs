@@ -271,14 +271,18 @@ impl Editor {
         for _ in 0..count {
             let line_str = self.engine.buffer.get_line(line);
             if col < line_str.chars().count() {
-                old_text.push(line_str[col..].chars().next().unwrap());
+                old_text.push(line_str.chars().nth(col).unwrap());
                 col += 1;
             }
         }
 
         // Vim aborts `{count}r` when the line has fewer characters left:
         // `5r!` on a two-character line changes nothing at all.
-        let available = self.engine.buffer.line_content_len(line) - self.engine.state.cursor.col;
+        let available = self
+            .engine
+            .buffer
+            .line_content_len(line)
+            .saturating_sub(self.engine.state.cursor.col);
         if count > available {
             self.engine.operator_state.replace_char = None;
             self.transition_mode(Mode::Normal);

@@ -132,6 +132,9 @@ impl Engine {
         let mut new_buffer = TextBuffer::new();
         new_buffer.set_file_path(Some(p.clone()));
         new_buffer.insert(1, 0, &content);
+        // Loading text counts as a modification; without this the buffer is
+        // reported dirty immediately after `:e`, so `:q` needlessly prompts.
+        new_buffer.mark_clean();
 
         // Switch current buffer to inactive, open new one as active.
         let current = (
@@ -198,6 +201,7 @@ impl Engine {
         } else {
             new_buffer.insert(1, 0, &listing);
         }
+        new_buffer.mark_clean();
 
         // Switch current buffer to inactive, open new one as active.
         let current = (
@@ -227,14 +231,13 @@ impl Engine {
         let current_dirty = if self.buffer.is_dirty() { " +" } else { "" };
         lines.push(format!("  * {}{}", current_name, current_dirty));
         // Inactive buffers.
-        for (i, (_, _, path, _)) in self.inactive_buffers.iter().enumerate() {
+        for (i, (buf, _, path, _)) in self.inactive_buffers.iter().enumerate() {
             let name = path
                 .as_ref()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "[No Name]".to_string());
-            // Check if dirty by checking modification count.
-            let dirty_marker = "";
+            let dirty_marker = if buf.is_dirty() { " +" } else { "" };
             lines.push(format!("  {} {}{}", i + 1, name, dirty_marker));
         }
         lines.join("\n")

@@ -235,7 +235,7 @@ impl Editor {
                     });
                 }
                 self.engine.register.set(register, &content);
-                (s_line.min(self.engine.buffer.line_count()), 0)
+                (s_line.min(self.engine.buffer.content_line_count()), 0)
             }
             VisualType::Block => {
                 let s_line = start.line.min(end.line);
@@ -245,7 +245,7 @@ impl Editor {
 
                 for line_num in s_line..=e_line {
                     let chars = self.engine.buffer.line_chars(line_num);
-                    let end_col = (e_col + 1).min(chars.len());
+                    let end_col = (e_col + 1).min(self.engine.buffer.line_content_len(line_num));
                     if s_col < end_col {
                         edits.push(Edit {
                             edit_type: EditType::Delete {
@@ -302,7 +302,7 @@ impl Editor {
             });
         }
         self.engine.register.set(register, &content);
-        self.engine.state.cursor.line = s_line.min(self.engine.buffer.line_count()).max(1);
+        self.engine.state.cursor.line = s_line.min(self.engine.buffer.content_line_count()).max(1);
         self.engine.state.cursor.col = 0;
         self.on_buffer_modified();
         edits
@@ -325,7 +325,10 @@ impl Editor {
         let cursor_before = self.engine.state.cursor;
         let mut edits = self.visual_delete_collect(register);
         let insert_at = Position {
-            line: start.line.min(self.engine.buffer.line_count()).max(1),
+            line: start
+                .line
+                .min(self.engine.buffer.content_line_count())
+                .max(1),
             col: start.col.min(self.line_content_len(start.line)),
         };
 
@@ -348,7 +351,7 @@ impl Editor {
         let (edit_line, edit_col) = if linewise {
             let line = insert_at.line;
             self.engine.buffer.insert(line, 0, &content);
-            self.engine.state.cursor.line = line.min(self.engine.buffer.line_count());
+            self.engine.state.cursor.line = line.min(self.engine.buffer.content_line_count());
             self.engine.state.cursor.col = self.first_non_blank_col(self.engine.state.cursor.line);
             (line, 0)
         } else {

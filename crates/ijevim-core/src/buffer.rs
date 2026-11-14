@@ -563,7 +563,9 @@ impl TextBuffer {
         let mut result = String::new();
         for line_num in s_line..=e_line {
             let chars = self.line_chars(line_num);
-            let end = e_col.min(chars.len());
+            // Bound by the content length so the line terminator is never
+            // included in the block; a short line contributes up to its end.
+            let end = e_col.min(self.line_content_len(line_num));
             if s_col < end {
                 result.push_str(&chars[s_col..end].iter().collect::<String>());
             }
@@ -602,7 +604,9 @@ impl TextBuffer {
         // deletion is at the same col range within its own line.
         for line_num in s_line..=e_line {
             let chars = self.line_chars(line_num);
-            let end = e_col.min(chars.len());
+            // Never touch the newline: an empty or short line just truncates
+            // the block at its content end.
+            let end = e_col.min(self.line_content_len(line_num));
             if s_col < end {
                 let line_content: String = chars[s_col..end].iter().collect();
                 result.push_str(&line_content);
@@ -727,5 +731,36 @@ mod tests {
         buf.mark_clean();
         assert!(!buf.is_dirty());
         assert!(buf.is_clean());
+    }
+}
+
+#[cfg(test)]
+mod block_regression_tests {
+    use super::*;
+
+    /// A visual-block range must never include the line terminator; doing so
+    /// used to delete the newline when the block reached past a short line.
+    #[test]
+    fn block_range_excludes_line_terminators() {
+        let buf = TextBuffer::with_text("ab\ncd\n");
+        assert_eq!(buf.get_block_range(1, 0, 2, 2), "ab\ncd");
+    }
+
+    #[test]
+    fn delete_block_range_never_removes_newlines() {
+        let mut buf = TextBuffer::with_text("ab\ncd\n");
+        buf.delete_block_range(1, 0, 2, 1);
+        assert_eq!(buf.to_string(), "b\nd\n");
+        assert_eq!(buf.content_line_count(), 2);
+    }
+
+    /// A short or empty line inside the block just contributes nothing; the
+    /// following line must not be joined onto it.
+    #[test]
+    fn delete_block_range_on_empty_line_keeps_rows() {
+        let mut buf = TextBuffer::with_text("ab\n\ncd\n");
+        buf.delete_block_range(1, 0, 3, 1);
+        assert_eq!(buf.to_string(), "b\n\nd\n");
+        assert_eq!(buf.content_line_count(), 3);
     }
 }
