@@ -3,16 +3,15 @@ use crate::editor::Editor;
 impl Editor {
     pub(crate) fn page_down(&mut self) {
         let terminal_rows = self.terminal.rows() as usize;
-        let line_count = self.engine.buffer.line_count();
+        let line_count = self.engine.buffer.content_line_count();
         self.engine.state.cursor.line = (self.engine.state.cursor.line + terminal_rows)
             .min(line_count)
             .max(1);
-        let len = self
+        let max_col = self
             .engine
             .buffer
-            .get_line(self.engine.state.cursor.line)
-            .len();
-        self.engine.state.cursor.col = self.engine.state.cursor.col.min(len.saturating_sub(1));
+            .line_max_col(self.engine.state.cursor.line);
+        self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
     }
 
     pub(crate) fn page_up(&mut self) {
@@ -24,16 +23,15 @@ impl Editor {
             .line
             .saturating_sub(terminal_rows)
             .max(1);
-        let len = self
+        let max_col = self
             .engine
             .buffer
-            .get_line(self.engine.state.cursor.line)
-            .len();
-        self.engine.state.cursor.col = self.engine.state.cursor.col.min(len.saturating_sub(1));
+            .line_max_col(self.engine.state.cursor.line);
+        self.engine.state.cursor.col = self.engine.state.cursor.col.min(max_col);
     }
 
     pub(crate) fn scroll_by(&mut self, lines: usize, forward: bool) {
-        let line_count = self.engine.buffer.line_count();
+        let line_count = self.engine.buffer.content_line_count();
         if forward {
             self.engine.state.cursor.line = (self.engine.state.cursor.line + lines)
                 .min(line_count)
@@ -85,7 +83,7 @@ impl Editor {
         let max_top = self
             .engine
             .buffer
-            .line_count()
+            .content_line_count()
             .saturating_sub(rows.saturating_sub(1))
             .max(1);
         let top = top.clamp(1, max_top);
@@ -158,7 +156,7 @@ impl Editor {
     }
 
     pub(crate) fn cursor_down(&mut self, n: usize) {
-        let line_count = self.engine.buffer.line_count();
+        let line_count = self.engine.buffer.content_line_count();
         self.engine.state.cursor.line = (self.engine.state.cursor.line + n).min(line_count);
         let max_col = self
             .engine
@@ -376,7 +374,8 @@ impl Editor {
         let len = content_len(&chars);
 
         if forward {
-            for (offset, &c) in chars[col + 1..len].iter().enumerate() {
+            let start = (col + 1).min(len);
+            for (offset, &c) in chars[start..len].iter().enumerate() {
                 if c == ch {
                     let i = col + 1 + offset;
                     self.engine.state.cursor.col = if till { i - 1 } else { i };
@@ -601,7 +600,7 @@ impl Editor {
                 current_col += 1;
                 if current_col >= self.engine.buffer.line_content_len(current_line) {
                     current_line += 1;
-                    if current_line > self.engine.buffer.line_count() {
+                    if current_line > self.engine.buffer.content_line_count() {
                         break;
                     }
                     current_col = 0;
@@ -633,7 +632,7 @@ impl Editor {
                 }
             }
 
-            if current_line > self.engine.buffer.line_count() || current_line < 1 {
+            if current_line > self.engine.buffer.content_line_count() || current_line < 1 {
                 break;
             }
         }

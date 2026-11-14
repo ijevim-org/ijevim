@@ -144,20 +144,27 @@ impl Editor {
                     if !word.is_empty() {
                         let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
                         let line_chars: Vec<char> = line.chars().collect();
+                        let content_len = self
+                            .engine
+                            .buffer
+                            .line_content_len(self.engine.state.cursor.line);
                         let mut aw_start = start;
-                        while aw_start > 0 {
-                            if line_chars[aw_start - 1] == ' ' || line_chars[aw_start - 1] == '\t' {
-                                aw_start -= 1;
-                            } else {
-                                break;
-                            }
-                        }
                         let mut aw_end = end;
-                        while aw_end < line_chars.len() {
-                            if line_chars[aw_end] == ' ' || line_chars[aw_end] == '\t' {
-                                aw_end += 1;
-                            } else {
-                                break;
+                        // Vim prefers the whitespace *after* the word; only
+                        // when the word ends the line does it take the
+                        // whitespace before it. The trailing newline is never
+                        // part of `aw`.
+                        while aw_end < content_len
+                            && (line_chars[aw_end] == ' ' || line_chars[aw_end] == '\t')
+                        {
+                            aw_end += 1;
+                        }
+                        if aw_end == end {
+                            while aw_start > 0
+                                && (line_chars[aw_start - 1] == ' '
+                                    || line_chars[aw_start - 1] == '\t')
+                            {
+                                aw_start -= 1;
                             }
                         }
                         let char_start = self
@@ -226,18 +233,26 @@ impl Editor {
 
         let line = self.engine.buffer.get_line(self.engine.state.cursor.line);
         let line_chars: Vec<char> = line.chars().collect();
+        let content_len = self
+            .engine
+            .buffer
+            .line_content_len(self.engine.state.cursor.line);
 
         let (content_start, content_end) = if inner {
             (start, end)
         } else {
-            // `aW` includes surrounding whitespace.
+            // `aW` includes surrounding whitespace, preferring the run after
+            // the WORD. The trailing newline must not be absorbed, or `daW`
+            // joins the current line with the next one.
             let mut aw_start = start;
-            while aw_start > 0 && line_chars[aw_start - 1].is_whitespace() {
-                aw_start -= 1;
-            }
             let mut aw_end = end;
-            while aw_end < line_chars.len() && line_chars[aw_end].is_whitespace() {
+            while aw_end < content_len && line_chars[aw_end].is_whitespace() {
                 aw_end += 1;
+            }
+            if aw_end == end {
+                while aw_start > 0 && line_chars[aw_start - 1].is_whitespace() {
+                    aw_start -= 1;
+                }
             }
             (aw_start, aw_end)
         };
@@ -272,18 +287,33 @@ impl Editor {
         let col = self.engine.state.cursor.col;
 
         let mut open_pos: Option<usize> = None;
-        for i in (0..col).rev() {
-            if chars[i] == quote {
-                open_pos = Some(i);
-                break;
-            }
-        }
-
         let mut close_pos: Option<usize> = None;
-        for (i, &c) in chars.iter().enumerate().skip(col + 1) {
-            if c == quote {
-                close_pos = Some(i);
-                break;
+
+        if chars.get(col) == Some(&quote) {
+            // Cursor sits on a quote. An even number of quotes before it means
+            // this one opens the pair, an odd number means it closes it.
+            let preceding = chars[..col].iter().filter(|&&c| c == quote).count();
+            if preceding % 2 == 0 {
+                if let Some(i) = (col + 1..chars.len()).find(|&i| chars[i] == quote) {
+                    open_pos = Some(col);
+                    close_pos = Some(i);
+                }
+            } else if let Some(i) = (0..col).rev().find(|&i| chars[i] == quote) {
+                open_pos = Some(i);
+                close_pos = Some(col);
+            }
+        } else {
+            for i in (0..col).rev() {
+                if chars[i] == quote {
+                    open_pos = Some(i);
+                    break;
+                }
+            }
+            for (i, &c) in chars.iter().enumerate().skip(col + 1) {
+                if c == quote {
+                    close_pos = Some(i);
+                    break;
+                }
             }
         }
 

@@ -69,7 +69,7 @@ impl Editor {
         start_line: usize,
         end_line: usize,
     ) {
-        let line_count = self.engine.buffer.line_count();
+        let line_count = self.engine.buffer.content_line_count();
         let start = start_line.max(1).min(line_count);
         let end = end_line.max(1).min(line_count);
         if start > end {
@@ -98,7 +98,7 @@ impl Editor {
 
     /// Yank whole lines `start_line..=end_line` into `register`.
     pub(crate) fn yank_lines_range(&mut self, register: char, start_line: usize, end_line: usize) {
-        let line_count = self.engine.buffer.line_count();
+        let line_count = self.engine.buffer.content_line_count();
         let start = start_line.max(1).min(line_count);
         let end = end_line.max(1).min(line_count);
         if start > end {
@@ -123,7 +123,7 @@ impl Editor {
         }
         self.push_undo_group(edits);
         self.defer_undo_since(marker);
-        self.engine.state.cursor.line = start.min(self.engine.buffer.line_count());
+        self.engine.state.cursor.line = start.min(self.engine.buffer.content_line_count());
         self.engine.state.cursor.col = 0;
         self.enter_insert_after_change();
     }
@@ -155,7 +155,7 @@ impl Editor {
         }
         self.push_undo_group(edits);
         self.defer_undo_since(marker);
-        self.engine.state.cursor.line = first.min(self.engine.buffer.line_count());
+        self.engine.state.cursor.line = first.min(self.engine.buffer.content_line_count());
         self.engine.state.cursor.col = 0;
         self.enter_insert_after_change();
     }
@@ -258,7 +258,7 @@ impl Editor {
             modification_count: mod_count,
         };
 
-        let line_count = self.engine.buffer.line_count();
+        let line_count = self.engine.buffer.content_line_count();
         if line > line_count {
             self.engine.state.cursor.line = line_count.max(1);
         }

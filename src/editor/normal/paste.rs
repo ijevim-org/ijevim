@@ -195,7 +195,7 @@ impl Editor {
             // `x` at the end of a line does not delete the line break; only
             // `J`, `dd`, or `X` join lines.
         } else {
-            let deleted_text: String = line_str[col..].chars().take(1).collect();
+            let deleted_text: String = line_str.chars().skip(col).take(1).collect();
             self.engine.buffer.delete(line, col);
             // Deleting the last character leaves the cursor one past the end;
             // Normal mode keeps it on the new last character.

@@ -343,3 +343,150 @@ fn emacs_ctrl_x_ctrl_slash_redo_does_not_panic() {
     let mut editor = test_editor(Keymap::Emacs);
     editor.redo();
 }
+
+// ── Regression tests for byte/char index and text-object bugs ─────────
+
+#[test]
+fn find_char_does_not_panic_on_empty_line() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 0 };
+    assert!(!editor.find_char('a', false, true));
+    assert!(!editor.find_char('a', false, false));
+}
+
+#[test]
+fn find_char_past_last_char_is_a_no_op() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("abc\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 2 };
+    assert!(!editor.find_char('a', false, true));
+}
+
+#[test]
+fn delete_char_handles_multibyte_lines() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("あいう\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 0 };
+    editor.delete_char('"');
+    assert_eq!(editor.engine.buffer.get_line(1), "いう\n");
+    assert_eq!(editor.engine.register.get('"'), "あ");
+}
+
+#[tokio::test]
+async fn replace_inline_char_handles_multibyte_lines() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("あいう\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 1 };
+    editor
+        .handle_key_for_test(KeyCode::Char('r'), KeyModifiers::NONE)
+        .await;
+    editor
+        .handle_key_for_test(KeyCode::Char('x'), KeyModifiers::NONE)
+        .await;
+    assert_eq!(editor.engine.buffer.get_line(1), "あxう\n");
+}
+
+#[test]
+fn page_down_clamps_column_by_character_count() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("あいう\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 10 };
+    editor.page_down();
+    assert_eq!(editor.engine.state.cursor.col, 2);
+    editor.page_up();
+    assert_eq!(editor.engine.state.cursor.col, 2);
+}
+
+#[tokio::test]
+async fn da_w_at_end_of_line_does_not_absorb_newline() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("foo\nbaz\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 1 };
+    editor
+        .handle_text_object(KeyCode::Char('W'), '"', false)
+        .await;
+    assert_eq!(editor.engine.buffer.get_line(1), "\n");
+    assert_eq!(editor.engine.buffer.get_line(2), "baz\n");
+    assert_eq!(editor.engine.buffer.content_line_count(), 2);
+}
+
+#[tokio::test]
+async fn visual_aw_at_end_of_line_stops_before_newline() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("foo\nbaz\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 1 };
+    editor
+        .handle_key_for_test(KeyCode::Char('v'), KeyModifiers::NONE)
+        .await;
+    editor
+        .handle_key_for_test(KeyCode::Char('a'), KeyModifiers::NONE)
+        .await;
+    editor
+        .handle_key_for_test(KeyCode::Char('w'), KeyModifiers::NONE)
+        .await;
+    assert_eq!(editor.engine.state.visual_start.unwrap().col, 0);
+    assert_eq!(editor.engine.state.cursor.col, 2);
+}
+
+#[tokio::test]
+async fn quote_text_object_works_when_cursor_is_on_opening_quote() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("let x = \"abc\";\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 8 };
+    editor
+        .handle_text_object(KeyCode::Char('"'), '"', false)
+        .await;
+    assert_eq!(editor.engine.buffer.get_line(1), "let x = ;\n");
+}
+
+#[test]
+fn increment_number_treats_09_as_decimal() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("09\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 0 };
+    editor.increment_number(1, 1);
+    assert_eq!(editor.engine.buffer.get_line(1), "10\n");
+}
+
+#[test]
+fn increment_number_keeps_real_octal() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("010\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 0 };
+    editor.increment_number(1, 1);
+    assert_eq!(editor.engine.buffer.get_line(1), "011\n");
+}
+
+#[tokio::test]
+async fn dollar_with_count_does_not_reach_phantom_line() {
+    let mut editor = test_editor(Keymap::Vim);
+    editor.engine.buffer = TextBuffer::with_text("one\ntwo\n");
+    editor.engine.state.cursor = crate::types::Position { line: 1, col: 0 };
+    editor.engine.operator_state.count = Some(5);
+    editor.handle_normal(KeyCode::Char('$')).await;
+    assert_eq!(editor.engine.state.cursor.line, 2);
+}
+
+#[test]
+fn buffer_open_leaves_the_buffer_clean() {
+    let mut editor = test_editor(Keymap::Vim);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("ijevim-open-{stamp}.txt"));
+    std::fs::write(&path, "hello\n").unwrap();
+
+    editor
+        .engine
+        .buffer_open(path.to_str().unwrap())
+        .expect("open buffer");
+    assert!(
+        !editor.engine.buffer.is_dirty(),
+        "loading a file must not mark the buffer modified"
+    );
+    assert_eq!(editor.engine.buffer.get_line(1), "hello\n");
+
+    std::fs::remove_file(&path).ok();
+}

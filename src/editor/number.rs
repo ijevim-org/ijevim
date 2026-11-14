@@ -115,7 +115,22 @@ fn parse_token(chars: &[char], start: usize, to: usize) -> Option<NumberToken> {
                 prefix = if chars[i + 1] == 'O' { "0O" } else { "0o" };
                 digits_start = i + 2;
             }
-            '0'..='9' => radix = 8,
+            '0'..='9' => {
+                // Vim treats a leading zero as octal only when the whole run
+                // is valid octal; `09` is decimal 9, not octal 0 followed by
+                // a stray 9.
+                let mut j = i + 1;
+                let mut octal = true;
+                while j < to && chars[j].is_ascii_digit() {
+                    if !matches!(chars[j], '0'..='7') {
+                        octal = false;
+                    }
+                    j += 1;
+                }
+                if octal {
+                    radix = 8;
+                }
+            }
             _ => {}
         }
     }
