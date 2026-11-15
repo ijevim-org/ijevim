@@ -19,6 +19,7 @@ impl Editor {
         end: usize,
     ) -> Option<Edit> {
         let line = self.engine.state.cursor.line;
+        let cursor_before = self.engine.state.cursor;
         let (start, end) = (start.min(end), start.max(end));
         let end = end.min(self.line_content_len(line));
         if start >= end {
@@ -43,7 +44,7 @@ impl Editor {
                 col: start,
                 text: content,
             },
-            cursor_before: self.engine.state.cursor,
+            cursor_before,
             cursor_after: self.engine.state.cursor,
             modification_count: mod_count,
         })
@@ -109,6 +110,12 @@ impl Editor {
         self.needs_render = true;
     }
     pub(crate) fn change_lines(&mut self, register: char, count: usize) {
+        // `{count}C`/`{count}S`/`{count}cc` on a one-line buffer has nowhere
+        // to reach, and Vim treats the whole command as a failed motion.
+        if count > 1 && self.engine.buffer.content_line_count() == 1 {
+            self.needs_render = true;
+            return;
+        }
         let marker = self.undo_marker();
         let start = self.engine.state.cursor.line;
         let mut edits = Vec::new();
@@ -184,6 +191,7 @@ impl Editor {
         if content.is_empty() {
             return None;
         }
+        let cursor_before = self.engine.state.cursor;
         let mod_count = self.engine.buffer.modification_count();
         let start_char = self.engine.buffer.line_to_char(from.0.saturating_sub(1)) + from.1;
         let end_char = start_char + content.chars().count();
@@ -198,7 +206,7 @@ impl Editor {
                 col: from.1,
                 text: content,
             },
-            cursor_before: self.engine.state.cursor,
+            cursor_before,
             cursor_after: self.engine.state.cursor,
             modification_count: mod_count,
         })
@@ -334,6 +342,11 @@ impl Editor {
     /// `D`: delete from the cursor to the end of the line, without removing the
     /// line break. With a count, the span reaches the end of the count-th line.
     pub(crate) fn delete_to_line_end(&mut self, register: char, count: usize) {
+        // Same one-line rule as `change_lines`: `2D` on `a` does nothing.
+        if count > 1 && self.engine.buffer.content_line_count() == 1 {
+            self.needs_render = true;
+            return;
+        }
         let line = self.engine.state.cursor.line;
         let col = self.engine.state.cursor.col;
         let count = count.max(1);

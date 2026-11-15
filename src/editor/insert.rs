@@ -15,9 +15,21 @@ impl Editor {
                     if !content.is_empty() {
                         let line = self.engine.state.cursor.line;
                         let col = self.engine.state.cursor.col;
+                        let cursor_before = self.engine.state.cursor;
+                        let mod_count = self.engine.buffer.modification_count();
                         self.engine.buffer.insert(line, col, &content);
                         self.engine.state.cursor.col += content.chars().count();
                         self.engine.insert_state.accum.push_str(&content);
+                        self.engine.insert_state.session_edits.push(Edit {
+                            edit_type: EditType::Insert {
+                                line,
+                                col,
+                                text: content.clone(),
+                            },
+                            cursor_before,
+                            cursor_after: self.engine.state.cursor,
+                            modification_count: mod_count,
+                        });
                         self.on_buffer_modified();
                     }
                     return;
@@ -43,9 +55,21 @@ impl Editor {
             };
             let line = self.engine.state.cursor.line;
             let col = self.engine.state.cursor.col;
+            let cursor_before = self.engine.state.cursor;
+            let mod_count = self.engine.buffer.modification_count();
             self.engine.buffer.insert(line, col, &text);
             self.engine.state.cursor.col += text.chars().count();
             self.engine.insert_state.accum.push_str(&text);
+            self.engine.insert_state.session_edits.push(Edit {
+                edit_type: EditType::Insert {
+                    line,
+                    col,
+                    text: text.clone(),
+                },
+                cursor_before,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
             self.on_buffer_modified();
             return;
         }
@@ -56,6 +80,11 @@ impl Editor {
                 // on every remaining line of the block, as one undo group.
                 if let Some(block) = self.block_insert.take() {
                     let text = std::mem::take(&mut self.engine.insert_state.accum);
+                    // The block replay builds its own edits from `text`; the
+                    // per-keystroke edits recorded for the first line would
+                    // otherwise be duplicated.
+                    self.engine.insert_state.session_edits.clear();
+                    self.engine.insert_state.repeat = None;
                     let cursor_before =
                         self.engine
                             .insert_state
@@ -103,25 +132,81 @@ impl Editor {
                     self.needs_render = true;
                     return;
                 }
-                // Push the newline opened by `o`/`O` and the typed text as one
-                // change, in the order they were applied.
-                let text = std::mem::take(&mut self.engine.insert_state.accum);
-                let start_pos = self.engine.insert_state.start_pos.take();
+                // Commit every mutation of the Insert session (including the
+                // edits that preceded it, such as the delete behind `c`) as
+                // one undo step. Recording each insertion/deletion preserves
+                // the exact order and lets backspacing over pre-existing text
+                // be undone.
+                let typed = std::mem::take(&mut self.engine.insert_state.accum);
+                self.engine.insert_state.start_pos = None;
+                let repeat_count = self.engine.insert_state.repeat_count.take().unwrap_or(1);
+                let repeat_mode = self.engine.insert_state.repeat.take();
+                if let Some(mode) = repeat_mode {
+                    let opens_line = matches!(
+                        mode,
+                        crate::types::InsertRepeat::OpenAbove
+                            | crate::types::InsertRepeat::OpenBelow
+                    );
+                    if opens_line || !typed.is_empty() {
+                        self.engine.dot_last_action = Some(DotAction::Insert {
+                            text: typed.clone(),
+                            mode,
+                        });
+                    }
+                }
                 let mut edits = std::mem::take(&mut self.engine.insert_state.pending_edits);
-                let mod_count = self.engine.buffer.modification_count();
-                if !text.is_empty() {
-                    let cursor_before =
-                        start_pos.unwrap_or(crate::types::Position { line: 1, col: 0 });
-                    edits.push(crate::undo::Edit {
-                        edit_type: crate::undo::EditType::Insert {
-                            line: cursor_before.line,
-                            col: cursor_before.col,
-                            text,
-                        },
-                        cursor_before,
-                        cursor_after: self.engine.state.cursor,
-                        modification_count: mod_count,
-                    });
+                edits.append(&mut self.engine.insert_state.session_edits);
+                // `3iX<Esc>` types `X` three times; `3oX<Esc>` opens three
+                // lines. Every repetition joins the session's undo group.
+                if repeat_count > 1 {
+                    if let Some(mode) = repeat_mode {
+                        let opens_line = matches!(
+                            mode,
+                            crate::types::InsertRepeat::OpenAbove
+                                | crate::types::InsertRepeat::OpenBelow
+                        );
+                        let mut line = self.engine.state.cursor.line;
+                        let mut col = self.engine.state.cursor.col;
+                        for _ in 1..repeat_count {
+                            if opens_line {
+                                let insert_line = line + 1;
+                                self.engine.buffer.insert(insert_line, 0, "\n");
+                                edits.push(Edit {
+                                    edit_type: EditType::Insert {
+                                        line: insert_line,
+                                        col: 0,
+                                        text: "\n".to_string(),
+                                    },
+                                    cursor_before: Position { line, col },
+                                    cursor_after: Position {
+                                        line: insert_line,
+                                        col: 0,
+                                    },
+                                    modification_count: self.engine.buffer.modification_count(),
+                                });
+                                line = insert_line;
+                                col = 0;
+                            }
+                            if !typed.is_empty() {
+                                self.engine.buffer.insert(line, col, &typed);
+                                edits.push(Edit {
+                                    edit_type: EditType::Insert {
+                                        line,
+                                        col,
+                                        text: typed.clone(),
+                                    },
+                                    cursor_before: Position { line, col },
+                                    cursor_after: Position {
+                                        line,
+                                        col: col + typed.chars().count(),
+                                    },
+                                    modification_count: self.engine.buffer.modification_count(),
+                                });
+                                col += typed.chars().count();
+                            }
+                        }
+                        self.engine.state.cursor = Position { line, col };
+                    }
                 }
                 match edits.len() {
                     0 => {}
@@ -134,34 +219,67 @@ impl Editor {
             }
             KeyCode::Backspace => {
                 if self.engine.state.cursor.col > 0 {
-                    self.engine.buffer.delete(
-                        self.engine.state.cursor.line,
-                        self.engine.state.cursor.col - 1,
-                    );
-                    self.engine.state.cursor.col -= 1;
-                    self.engine.insert_state.accum.pop();
-                    self.on_buffer_modified();
-                } else if self.engine.state.cursor.line > 1 {
-                    let new_col = self
+                    let line = self.engine.state.cursor.line;
+                    let col = self.engine.state.cursor.col;
+                    let cursor_before = self.engine.state.cursor;
+                    let mod_count = self.engine.buffer.modification_count();
+                    let deleted = self
                         .engine
                         .buffer
-                        .merge_with_prev_line(self.engine.state.cursor.line);
+                        .line_chars(line)
+                        .get(col - 1)
+                        .copied()
+                        .unwrap_or('\0');
+                    self.engine.buffer.delete(line, col - 1);
+                    self.engine.state.cursor.col -= 1;
+                    self.engine.insert_state.accum.pop();
+                    self.engine.insert_state.session_edits.push(Edit {
+                        edit_type: EditType::Delete {
+                            line,
+                            col: col - 1,
+                            text: deleted.to_string(),
+                        },
+                        cursor_before,
+                        cursor_after: self.engine.state.cursor,
+                        modification_count: mod_count,
+                    });
+                    self.on_buffer_modified();
+                } else if self.engine.state.cursor.line > 1 {
+                    let line = self.engine.state.cursor.line;
+                    let cursor_before = self.engine.state.cursor;
+                    let mod_count = self.engine.buffer.modification_count();
+                    let new_col = self.engine.buffer.merge_with_prev_line(line);
                     self.engine.state.cursor.line -= 1;
                     self.engine.state.cursor.col = new_col;
                     // Remove the last newline from accumulator
                     self.engine.insert_state.accum.pop();
+                    self.engine.insert_state.session_edits.push(Edit {
+                        edit_type: EditType::Merge {
+                            line: line - 1,
+                            deleted_newline_col: new_col,
+                        },
+                        cursor_before,
+                        cursor_after: self.engine.state.cursor,
+                        modification_count: mod_count,
+                    });
                     self.on_buffer_modified();
                 }
             }
             KeyCode::Enter => {
-                self.engine.buffer.insert(
-                    self.engine.state.cursor.line,
-                    self.engine.state.cursor.col,
-                    "\n",
-                );
+                let line = self.engine.state.cursor.line;
+                let col = self.engine.state.cursor.col;
+                let cursor_before = self.engine.state.cursor;
+                let mod_count = self.engine.buffer.modification_count();
+                self.engine.buffer.insert(line, col, "\n");
                 self.engine.state.cursor.line += 1;
                 self.engine.state.cursor.col = 0;
                 self.engine.insert_state.accum.push('\n');
+                self.engine.insert_state.session_edits.push(Edit {
+                    edit_type: EditType::Split { line, col },
+                    cursor_before,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                });
                 self.on_buffer_modified();
             }
             KeyCode::Tab => {
@@ -170,23 +288,43 @@ impl Editor {
                 } else {
                     "\t".to_string()
                 };
-                self.engine.buffer.insert(
-                    self.engine.state.cursor.line,
-                    self.engine.state.cursor.col,
-                    &text,
-                );
+                let line = self.engine.state.cursor.line;
+                let col = self.engine.state.cursor.col;
+                let cursor_before = self.engine.state.cursor;
+                let mod_count = self.engine.buffer.modification_count();
+                self.engine.buffer.insert(line, col, &text);
                 self.engine.state.cursor.col += text.chars().count();
                 self.engine.insert_state.accum.push_str(&text);
+                self.engine.insert_state.session_edits.push(Edit {
+                    edit_type: EditType::Insert {
+                        line,
+                        col,
+                        text: text.clone(),
+                    },
+                    cursor_before,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                });
                 self.on_buffer_modified();
             }
             KeyCode::Char(c) => {
-                self.engine.buffer.insert_char(
-                    self.engine.state.cursor.line,
-                    self.engine.state.cursor.col,
-                    c,
-                );
+                let line = self.engine.state.cursor.line;
+                let col = self.engine.state.cursor.col;
+                let cursor_before = self.engine.state.cursor;
+                let mod_count = self.engine.buffer.modification_count();
+                self.engine.buffer.insert_char(line, col, c);
                 self.engine.state.cursor.col += 1;
                 self.engine.insert_state.accum.push(c);
+                self.engine.insert_state.session_edits.push(Edit {
+                    edit_type: EditType::Insert {
+                        line,
+                        col,
+                        text: c.to_string(),
+                    },
+                    cursor_before,
+                    cursor_after: self.engine.state.cursor,
+                    modification_count: mod_count,
+                });
                 self.on_buffer_modified();
             }
             _ => {}
@@ -233,8 +371,21 @@ impl Editor {
             return;
         }
 
+        let cursor_before = self.engine.state.cursor;
+        let mod_count = self.engine.buffer.modification_count();
+        let deleted: String = chars[start..col].iter().collect();
         self.engine.buffer.delete_range(line, start, line, col);
         self.engine.state.cursor.col = start;
+        self.engine.insert_state.session_edits.push(Edit {
+            edit_type: EditType::Delete {
+                line,
+                col: start,
+                text: deleted,
+            },
+            cursor_before,
+            cursor_after: self.engine.state.cursor,
+            modification_count: mod_count,
+        });
         // Remove deleted chars from accumulator
         for _ in 0..(col - start) {
             self.engine.insert_state.accum.pop();
@@ -249,8 +400,20 @@ impl Editor {
         if col > 0 {
             let line_str = self.engine.buffer.get_line(line);
             let deleted: String = line_str.chars().take(col).collect();
+            let cursor_before = self.engine.state.cursor;
+            let mod_count = self.engine.buffer.modification_count();
             self.engine.buffer.delete_range(line, 0, line, col);
             self.engine.state.cursor.col = 0;
+            self.engine.insert_state.session_edits.push(Edit {
+                edit_type: EditType::Delete {
+                    line,
+                    col: 0,
+                    text: deleted.clone(),
+                },
+                cursor_before,
+                cursor_after: self.engine.state.cursor,
+                modification_count: mod_count,
+            });
             // Remove deleted chars from accumulator
             for _ in deleted.chars() {
                 self.engine.insert_state.accum.pop();
@@ -264,6 +427,7 @@ impl Editor {
     fn handle_replace_inline_char(&mut self, c: char) {
         let count = self.engine.operator_state.count.take().unwrap_or(1);
         let line = self.engine.state.cursor.line;
+        let cursor_before = self.engine.state.cursor;
         let mut col = self.engine.state.cursor.col;
 
         // Collect the text being replaced (for undo).
@@ -317,11 +481,11 @@ impl Editor {
         self.engine.undo_manager.push(Edit {
             edit_type: EditType::Replace {
                 line,
-                col: self.engine.state.cursor.col,
+                col: start_col,
                 old_text,
                 new_text,
             },
-            cursor_before: self.engine.state.cursor,
+            cursor_before,
             cursor_after: self.engine.state.cursor,
             modification_count: mod_count,
         });
@@ -350,13 +514,18 @@ impl Editor {
                 // Flush accumulated Replace mode edits as a single undo group.
                 if !self.engine.replace_undo_group.is_empty() {
                     let edits = std::mem::take(&mut self.engine.replace_undo_group);
-                    let mod_count = self.engine.buffer.modification_count();
+                    // Undo must restore the cursor to where Replace mode
+                    // started, not to the end of the replacement run.
+                    let cursor_before = edits[0].cursor_before;
+                    let modification_count = edits[0].modification_count;
                     self.engine.undo_manager.push(Edit {
                         edit_type: EditType::Group { edits },
-                        cursor_before: self.engine.state.cursor,
+                        cursor_before,
                         cursor_after: self.engine.state.cursor,
-                        modification_count: mod_count,
+                        modification_count,
                     });
+                    // Vim leaves the cursor on the last replaced character.
+                    self.engine.state.cursor.col = self.engine.state.cursor.col.saturating_sub(1);
                 }
                 self.engine.operator_state.replace_char = None;
                 self.transition_mode(Mode::Normal);
@@ -380,20 +549,30 @@ impl Editor {
                 } else {
                     '\0'
                 };
-                if old_char != '\0' {
-                    self.engine.buffer.delete(line, col);
-                }
-                self.engine.buffer.insert_char(line, col, c);
-                self.engine.state.cursor.col += 1;
-                // Record the replace for undo grouping.
                 let mod_count = self.engine.buffer.modification_count();
-                self.engine.replace_undo_group.push(Edit {
-                    edit_type: EditType::Replace {
+                let edit_type = if old_char != '\0' {
+                    self.engine.buffer.delete(line, col);
+                    self.engine.buffer.insert_char(line, col, c);
+                    EditType::Replace {
                         line,
                         col,
                         old_text: old_char.to_string(),
                         new_text: c.to_string(),
-                    },
+                    }
+                } else {
+                    // Past the end of the line there is nothing to replace:
+                    // record an insertion so undo does not resurrect a NUL.
+                    self.engine.buffer.insert_char(line, col, c);
+                    EditType::Insert {
+                        line,
+                        col,
+                        text: c.to_string(),
+                    }
+                };
+                self.engine.state.cursor.col += 1;
+                // Record the replace for undo grouping.
+                self.engine.replace_undo_group.push(Edit {
+                    edit_type,
                     cursor_before: Position { line, col },
                     cursor_after: self.engine.state.cursor,
                     modification_count: mod_count,

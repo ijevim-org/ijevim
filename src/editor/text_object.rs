@@ -89,6 +89,7 @@ impl Editor {
         let prev_mode = self.engine.state.mode;
         self.engine.state.mode = crate::types::Mode::Insert;
         self.engine.insert_state.accum.clear();
+        self.engine.insert_state.session_edits.clear();
         self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
         self.engine
             .plugin_manager
@@ -315,6 +316,16 @@ impl Editor {
                     break;
                 }
             }
+            // The cursor may sit before the quoted string. Vim then takes the
+            // next complete pair instead of doing nothing.
+            if open_pos.is_none() {
+                if let Some(open) = (col..chars.len()).find(|&i| chars[i] == quote) {
+                    if let Some(close) = (open + 1..chars.len()).find(|&i| chars[i] == quote) {
+                        open_pos = Some(open);
+                        close_pos = Some(close);
+                    }
+                }
+            }
         }
 
         if let Some(start) = open_pos {
@@ -322,7 +333,20 @@ impl Editor {
                 let (content_start, content_end) = if inner {
                     (start + 1, end)
                 } else {
-                    (start, end + 1)
+                    // `a'` also eats the white space on one side, like Vim:
+                    // trailing space when present, otherwise leading space.
+                    let mut end = end + 1;
+                    let before = end;
+                    while end < chars.len() && matches!(chars[end], ' ' | '\t') {
+                        end += 1;
+                    }
+                    let mut start = start;
+                    if end == before {
+                        while start > 0 && matches!(chars[start - 1], ' ' | '\t') {
+                            start -= 1;
+                        }
+                    }
+                    (start, end)
                 };
 
                 let content: String = chars[content_start..content_end].iter().collect();
@@ -336,9 +360,12 @@ impl Editor {
 
                 self.engine.register.set(register, &content);
                 self.engine.buffer.remove_range(char_start, char_end);
+                let line = self.engine.state.cursor.line;
+                self.engine.state.cursor.col =
+                    content_start.min(self.engine.buffer.line_max_col(line));
                 self.engine.undo_manager.push(Edit {
                     edit_type: EditType::Delete {
-                        line: self.engine.state.cursor.line,
+                        line,
                         col: content_start,
                         text: content,
                     },

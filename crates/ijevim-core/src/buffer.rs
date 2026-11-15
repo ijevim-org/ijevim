@@ -388,17 +388,23 @@ impl TextBuffer {
         if start_line > end_line || start_line < 1 {
             return String::new();
         }
-        let start = start_line.saturating_sub(1);
-        let end = end_line.min(self.doc.len_lines());
-        if start >= end {
+        let last_line = self.content_line_count();
+        if start_line > last_line {
             return String::new();
         }
-        let mut result = String::new();
-        for i in start..end {
-            result.push_str(&self.doc.line(i).to_string());
-            if i < end - 1 {
-                result.push('\n');
-            }
+        let end_line = end_line.min(last_line);
+        let start = self.doc.line_to_char(start_line - 1);
+        let end = if end_line < self.doc.len_lines() {
+            self.doc.line_to_char(end_line)
+        } else {
+            self.doc.len_chars()
+        };
+        let mut result = self.doc.slice(start..end).to_string();
+        // A linewise register must always be newline-terminated, even when the
+        // file's last line has no trailing newline; otherwise `p` treats the
+        // yank as charwise and pastes it inline.
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
         }
         result
     }
@@ -434,7 +440,10 @@ impl TextBuffer {
         result.push_str(&first.chars().skip(start_col).collect::<String>());
         result.push('\n');
         for line_num in (start_line + 1)..end_line {
-            result.push_str(&self.get_line(line_num));
+            let middle = self.get_line(line_num);
+            let middle = middle.strip_suffix('\n').unwrap_or(&middle);
+            let middle = middle.strip_suffix('\r').unwrap_or(middle);
+            result.push_str(middle);
             result.push('\n');
         }
         result.push_str(

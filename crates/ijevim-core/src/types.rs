@@ -800,11 +800,30 @@ impl Default for KillRing {
     }
 }
 
+/// How a dot-repeatable Insert session should be replayed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum InsertRepeat {
+    /// `i`: insert at the cursor column.
+    #[default]
+    Inline,
+    /// `a`: insert one column to the right of the cursor.
+    Append,
+    /// `I`: insert at the first non-blank column.
+    LineStart,
+    /// `A`: insert at the end of the line.
+    LineEnd,
+    /// `o`: open a new line below and insert there.
+    OpenBelow,
+    /// `O`: open a new line above and insert there.
+    OpenAbove,
+}
+
 /// Action that can be repeated with `.` in Vim normal mode.
 #[derive(Clone)]
 pub enum DotAction {
     Insert {
         text: String,
+        mode: InsertRepeat,
     },
     Delete {
         text: String,

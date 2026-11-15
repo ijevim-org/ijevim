@@ -8,6 +8,8 @@ impl Editor {
     /// Enter Insert mode after a `c{motion}` deletion.
     pub(crate) fn enter_insert_after_change(&mut self) {
         self.engine.insert_state.accum.clear();
+        self.engine.insert_state.session_edits.clear();
+        self.engine.insert_state.repeat_count = None;
         self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
         let prev_mode = self.engine.state.mode;
         self.engine.state.mode = Mode::Insert;
@@ -221,19 +223,91 @@ impl Editor {
 
         self.on_buffer_modified();
     }
+    /// Replay a dot-repeatable Insert session.
+    fn repeat_insert(&mut self, text: &str, mode: crate::types::InsertRepeat) {
+        use crate::types::InsertRepeat;
+
+        let cursor_before = self.engine.state.cursor;
+        let mod_count = self.engine.buffer.modification_count();
+        let mut edits = Vec::new();
+        let mut line = self.engine.state.cursor.line;
+        let mut col = self.engine.state.cursor.col;
+
+        match mode {
+            InsertRepeat::Inline => {}
+            InsertRepeat::Append => {
+                col = (col + 1).min(self.line_content_len(line));
+            }
+            InsertRepeat::LineStart => {
+                col = self.first_non_blank_col(line);
+            }
+            InsertRepeat::LineEnd => {
+                col = self.line_content_len(line);
+            }
+            InsertRepeat::OpenBelow => {
+                let insert_line = line + 1;
+                self.engine.buffer.insert(insert_line, 0, "\n");
+                edits.push(Edit {
+                    edit_type: EditType::Insert {
+                        line: insert_line,
+                        col: 0,
+                        text: "\n".to_string(),
+                    },
+                    cursor_before,
+                    cursor_after: cursor_before,
+                    modification_count: mod_count,
+                });
+                line = insert_line;
+                col = 0;
+            }
+            InsertRepeat::OpenAbove => {
+                self.engine.buffer.insert(line, 0, "\n");
+                edits.push(Edit {
+                    edit_type: EditType::Insert {
+                        line,
+                        col: 0,
+                        text: "\n".to_string(),
+                    },
+                    cursor_before,
+                    cursor_after: cursor_before,
+                    modification_count: mod_count,
+                });
+                col = 0;
+            }
+        }
+
+        if !text.is_empty() {
+            self.engine.buffer.insert(line, col, text);
+            edits.push(Edit {
+                edit_type: EditType::Insert {
+                    line,
+                    col,
+                    text: text.to_string(),
+                },
+                cursor_before,
+                cursor_after: Position { line, col },
+                modification_count: mod_count,
+            });
+        }
+
+        if edits.is_empty() {
+            return;
+        }
+
+        let last_col = col + text.chars().count().saturating_sub(1);
+        self.engine.state.cursor = Position {
+            line,
+            col: last_col.min(self.line_content_len(line).saturating_sub(1)),
+        };
+        self.push_undo_group(edits);
+        self.on_buffer_modified();
+    }
+
     pub(super) async fn repeat_last_action(&mut self) {
         if let Some(action) = &self.engine.dot_last_action {
             match action.clone() {
-                DotAction::Insert { text } => {
-                    for ch in text.chars() {
-                        self.engine.buffer.insert_char(
-                            self.engine.state.cursor.line,
-                            self.engine.state.cursor.col,
-                            ch,
-                        );
-                        self.engine.state.cursor.col += 1;
-                    }
-                    self.on_buffer_modified();
+                DotAction::Insert { text, mode } => {
+                    self.repeat_insert(&text, mode);
                 }
                 DotAction::Delete {
                     text: _,
@@ -303,6 +377,12 @@ impl Editor {
             modification_count: mod_count,
         });
         self.engine.insert_state.accum.clear();
+        self.engine.insert_state.session_edits.clear();
+        self.engine.insert_state.repeat = Some(if above {
+            crate::types::InsertRepeat::OpenAbove
+        } else {
+            crate::types::InsertRepeat::OpenBelow
+        });
         self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
 
         let prev_mode = self.engine.state.mode;
@@ -312,8 +392,14 @@ impl Editor {
             to: Mode::Insert,
         });
 
+        // Keep the empty text here; `Esc` fills in what was typed.
         self.engine.dot_last_action = Some(DotAction::Insert {
             text: String::new(),
+            mode: if above {
+                crate::types::InsertRepeat::OpenAbove
+            } else {
+                crate::types::InsertRepeat::OpenBelow
+            },
         });
         self.on_buffer_modified();
     }

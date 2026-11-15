@@ -42,6 +42,12 @@ pub struct OperatorState {
     pub replace_char: Option<char>,
     /// Ctrl-w prefix: waiting for second key (w, j, k, h, l, c, =, _, |, etc.)
     pub ctrl_w_prefix: bool,
+    /// Count typed before the operator (e.g. the `2` in `2d2w`).
+    ///
+    /// A count typed after the operator (`2d` then `2w`) multiplies with this
+    /// one; keeping it separate prevents the digits from being concatenated
+    /// into `22`.
+    pub operator_count: Option<usize>,
 }
 
 impl OperatorState {
@@ -54,6 +60,7 @@ impl OperatorState {
         self.macro_play = None;
         self.replace_char = None;
         self.ctrl_w_prefix = false;
+        self.operator_count = None;
     }
 
     /// Take the accumulated count, defaulting to 1 if absent.
@@ -143,8 +150,23 @@ pub struct InsertState {
     /// Edits made just before Insert mode (the newline from `o`/`O`, or the
     /// deletion behind `c`/`s`), committed with the typed text as one change.
     pub pending_edits: Vec<Edit>,
+    /// Every edit performed during the current Insert session, in order.
+    ///
+    /// Recording each insertion and deletion explicitly keeps undo correct
+    /// when the user backspaces over pre-existing text or joins lines; the
+    /// accumulated text alone cannot represent those changes.
+    pub session_edits: Vec<Edit>,
     /// Set by Ctrl-r in insert mode; the next non-modifier key selects a register.
     pub waiting_register: bool,
     /// Set by Ctrl-v in insert mode; the next key is inserted literally.
     pub waiting_literal: bool,
+    /// Count typed before `i`/`a`/`I`/`A`/`o`/`O`; the typed text is repeated
+    /// that many times when the session ends.
+    pub repeat_count: Option<usize>,
+    /// The command that opened this Insert session, when it is dot-repeatable.
+    ///
+    /// Plain `i`/`a`/`I`/`A`/`o`/`O` can be replayed by `.`; changes (`cw`,
+    /// `ciw`, ...) need their deletion replayed too, so they leave this as
+    /// `None` until that is implemented.
+    pub repeat: Option<crate::types::InsertRepeat>,
 }
