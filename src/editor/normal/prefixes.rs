@@ -66,28 +66,6 @@ impl Editor {
         true
     }
 
-    /// Handle the file-browser keys that override normal editing.
-    pub(super) fn handle_directory_prefix(&mut self, key: KeyCode) -> bool {
-        if !self.engine.buffer.is_directory_listing() {
-            return false;
-        }
-        match key {
-            KeyCode::Enter => {
-                self.open_selected_entry();
-                true
-            }
-            KeyCode::Char('-') => {
-                self.go_up_directory();
-                true
-            }
-            KeyCode::Char('R') => {
-                self.refresh_directory();
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// Resolve a pending operator/text-object before dispatching a new key.
     pub(super) async fn handle_pending_operator(&mut self, key: KeyCode) -> bool {
         let state = std::mem::replace(

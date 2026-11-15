@@ -23,9 +23,6 @@ impl Editor {
         if self.handle_count_prefix(key) {
             return;
         }
-        if self.handle_directory_prefix(key) {
-            return;
-        }
         if self.handle_pending_operator(key).await {
             return;
         }

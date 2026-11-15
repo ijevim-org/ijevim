@@ -1,8 +1,7 @@
 pub(crate) mod cmd;
 pub(crate) mod cmd_complete;
-mod dashboard;
-mod dired;
 pub(crate) mod emacs_ops;
+mod file_tree;
 pub(crate) mod insert;
 pub(crate) mod macro_marks;
 pub(crate) mod motion;
@@ -207,9 +206,9 @@ impl Editor {
             eprintln!("Plugin loading warning: {}", e);
         }
 
-        let show_dashboard = file_path.is_none();
+        let has_file = buffer.file_path().is_some();
+        let file_tree_enabled = cfg.file_tree;
         let state = EditorState {
-            show_dashboard,
             file_path: buffer.file_path().map(|p| p.to_path_buf()),
             cursor: Position { line: 1, col: 0 },
             show_line_numbers: cfg.show_line_numbers,
@@ -218,14 +217,9 @@ impl Editor {
             ..EditorState::default()
         };
 
-        Ok(Editor::new_shared(
-            terminal,
-            buffer,
-            plugin_manager,
-            state,
-            keymap,
-            cfg,
-        ))
+        let mut editor = Editor::new_shared(terminal, buffer, plugin_manager, state, keymap, cfg);
+        editor.init_file_tree(file_tree_enabled, !has_file);
+        Ok(editor)
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -238,6 +232,7 @@ impl Editor {
             let rows = self.terminal.rows() as usize;
             let cols = self.terminal.cols() as usize;
             self.engine.update_window_layout(rows, cols);
+            self.sync_layout_inset();
         }
 
         self.update_review_viewport();
@@ -274,6 +269,7 @@ impl Editor {
                         let rows = self.terminal.rows() as usize;
                         let cols = self.terminal.cols() as usize;
                         self.engine.update_window_layout(rows, cols);
+                        self.sync_layout_inset();
                         self.needs_render = true;
                     }
                     Ok(_) => {}
@@ -425,12 +421,23 @@ impl Editor {
             return;
         }
 
-        // ── Dashboard mode intercept ──
-        // If the dashboard is shown, intercept keys here before the keymap
-        // handler gets involved.
-        // Key not consumed (fall-through): dashboard was dismissed, so
-        // continue to normal key processing below.
-        if self.engine.state.show_dashboard && self.handle_dashboard_key(key) {
+        // ── File-tree sidebar ──
+        // F2 toggles the explorer, F3 moves focus in and out. When focused,
+        // every other key belongs to the tree so editor commands cannot leak
+        // into the highlighted entry.
+        match key {
+            KeyCode::F(2) => {
+                self.toggle_file_tree();
+                return;
+            }
+            KeyCode::F(3) => {
+                self.toggle_file_tree_focus();
+                return;
+            }
+            _ => {}
+        }
+        if self.engine.state.file_tree.focused {
+            self.handle_file_tree_key(key);
             return;
         }
 

@@ -13,6 +13,8 @@ pub struct Config {
     pub wrap: bool,
     /// Preview search matches while typing the pattern.
     pub incsearch: bool,
+    /// Show the file-tree sidebar by default (VSCode-style explorer).
+    pub file_tree: bool,
 }
 
 impl Default for Config {
@@ -23,6 +25,7 @@ impl Default for Config {
             show_relative_numbers: false,
             wrap: true,
             incsearch: true,
+            file_tree: true,
         }
     }
 }
@@ -101,6 +104,16 @@ impl Config {
                 Some(b) => out.incsearch = b,
                 None => eprintln!(
                     "[config] Ignoring 'incsearch' in {}: not a bool",
+                    path.display()
+                ),
+            }
+        }
+
+        if let Some(v) = table.get("file_tree") {
+            match v.as_bool() {
+                Some(b) => out.file_tree = b,
+                None => eprintln!(
+                    "[config] Ignoring 'file_tree' in {}: not a bool",
                     path.display()
                 ),
             }

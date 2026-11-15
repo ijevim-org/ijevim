@@ -4,7 +4,7 @@ use crate::terminal::Terminal;
 use crossterm::style::Color;
 use ijevim_core::buffer::TextBuffer;
 use ijevim_core::types::{
-    EditorState, Keymap, MessageLevel, Mode, VisualType, Window, WindowLayout,
+    EditorState, FileTreeState, Keymap, MessageLevel, Mode, VisualType, Window, WindowLayout,
 };
 use ijevim_highlight::Style;
 use std::io;
@@ -25,15 +25,25 @@ const CURSOR_FG: Color = Color::Black;
 const CURSOR_BG: Color = Color::White;
 const STATUS_ERROR_BG: Color = Color::Red;
 const STATUS_ERROR_FG: Color = Color::White;
-/// Colour for directory entries in a directory listing buffer.
-const DIR_ENTRY_FG: Color = Color::AnsiValue(81);
+// ── File-tree sidebar colours ─────────────────────────────────────────
+const SIDEBAR_BG: Color = Color::AnsiValue(235);
+const SIDEBAR_HEADER_BG: Color = Color::AnsiValue(24);
+const SIDEBAR_SELECTED_BG: Color = Color::AnsiValue(237);
+const SIDEBAR_SELECTED_FOCUS_BG: Color = Color::AnsiValue(24);
+const SIDEBAR_FG: Color = Color::AnsiValue(250);
+const SIDEBAR_DIR_FG: Color = Color::AnsiValue(117);
+const SIDEBAR_CURRENT_FG: Color = Color::AnsiValue(220);
+const SIDEBAR_SEP_FG: Color = Color::AnsiValue(240);
+const SIDEBAR_HINT_FG: Color = Color::AnsiValue(245);
 
 /// Mode-line label for the current input mode.
 ///
 /// Emacs is modeless, so the internal `Mode::Normal` must not be shown as
 /// `NORMAL` when the Emacs keymap is active.
 fn mode_label(state: &EditorState) -> &'static str {
-    if state.region_active {
+    if state.file_tree.focused {
+        " TREE "
+    } else if state.region_active {
         if state.mark == Some(state.cursor) {
             " MARK "
         } else {
@@ -129,17 +139,6 @@ impl Renderer {
             self.screen.invalidate_all();
         }
 
-        // ── Welcome dashboard (shown when no file is loaded) ──
-        if state.show_dashboard && state.file_path.is_none() {
-            crate::dashboard::render_dashboard(&mut self.screen, rows, cols);
-            self.render_status_bar(rows, cols, state);
-            let ansi_output = self.screen.render();
-            if !ansi_output.is_empty() {
-                terminal.write_raw(ansi_output.as_bytes())?;
-            }
-            return Ok(());
-        }
-
         // ── Review mode uses its own rendering ──
         if let Some(rv) = review_state {
             crate::review::render::render_review(&mut self.screen, rv, rows, cols);
@@ -153,6 +152,7 @@ impl Renderer {
 
         // If no windows, just show empty screen with status bar
         if window_layout.windows.is_empty() {
+            self.render_file_tree(state, rows, cols);
             self.render_status_bar(rows, cols, state);
             let ansi_output = self.screen.render();
             if !ansi_output.is_empty() {
@@ -177,6 +177,9 @@ impl Renderer {
 
         // Draw window separators
         self.draw_window_separators(window_layout, cols);
+
+        // File-tree sidebar occupies the reserved left edge.
+        self.render_file_tree(state, rows, cols);
 
         // Render global status bar (last row)
         self.render_status_bar(rows, cols, state);
@@ -205,7 +208,15 @@ impl Renderer {
             return Ok(());
         }
 
-        // Position visual cursor at focused window's cursor position.
+        // Position visual cursor at focused window's cursor position. The
+        // tree owns focus when shown as active, so the editor cursor is hidden.
+        if state.file_tree.focused {
+            let ansi_output = self.screen.render();
+            if !ansi_output.is_empty() {
+                terminal.write_raw(ansi_output.as_bytes())?;
+            }
+            return Ok(());
+        }
         if let Some(focused_window) = window_layout.windows.get(window_layout.focused) {
             // Select the buffer shown in the focused window (same logic as render_window).
             let buf = if focused_window.buf_idx == 0 {
@@ -371,10 +382,6 @@ impl Renderer {
             }
 
             // Content
-            let is_dir_line = buffer.is_directory_listing()
-                && buffer
-                    .selected_entry(vline.buffer_line)
-                    .is_some_and(|e| e.is_dir);
             // `hlsearch` matches for this line, as character ranges. Computed
             // once per line and then looked up per cell through `source_cols`,
             // so tab expansion cannot shift the highlight.
@@ -427,10 +434,6 @@ impl Renderer {
                     {
                         cell_style.bg = CURRENT_LINE_BG;
                     }
-                    // Directory entries in file browser are shown in a distinct colour
-                    if is_dir_line {
-                        cell_style.fg = DIR_ENTRY_FG;
-                    }
                     self.screen
                         .set_cell(target_row, target_col, *ch, cell_style);
                 }
@@ -470,6 +473,165 @@ impl Renderer {
                 self.screen
                     .set_cell(target_row, col, ' ', CellStyle::default());
             }
+        }
+    }
+
+    /// Draw the VSCode-style file-tree sidebar in the reserved left columns.
+    fn render_file_tree(&mut self, state: &EditorState, rows: usize, cols: usize) {
+        let tree = &state.file_tree;
+        let width = FileTreeState::width_for(cols);
+        if !tree.visible || width == 0 {
+            return;
+        }
+        let content_rows = rows.saturating_sub(1);
+        if content_rows == 0 {
+            return;
+        }
+        let content_width = width.saturating_sub(1); // last column is the divider
+        if content_width == 0 {
+            return;
+        }
+
+        let base_style = CellStyle {
+            fg: SIDEBAR_FG,
+            bg: SIDEBAR_BG,
+            ..CellStyle::default()
+        };
+        for row in 0..content_rows {
+            for col in 0..content_width {
+                self.screen.set_cell(row, col, ' ', base_style);
+            }
+            self.screen.set_cell(
+                row,
+                width - 1,
+                '│',
+                CellStyle {
+                    fg: SIDEBAR_SEP_FG,
+                    bg: SIDEBAR_BG,
+                    ..CellStyle::default()
+                },
+            );
+        }
+
+        // ── Header ──
+        let header_style = CellStyle {
+            fg: Color::White,
+            bg: if tree.focused {
+                SIDEBAR_HEADER_BG
+            } else {
+                SIDEBAR_BG
+            },
+            bold: true,
+            ..CellStyle::default()
+        };
+        for col in 0..content_width {
+            self.screen.set_cell(0, col, ' ', header_style);
+        }
+        put_sidebar_text(
+            &mut self.screen,
+            0,
+            1,
+            content_width.saturating_sub(1),
+            "EXPLORER",
+            header_style,
+        );
+
+        // ── Root name ──
+        if content_rows > 1 {
+            let root_name = tree
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| tree.root.to_string_lossy().to_string());
+            let root_style = CellStyle {
+                fg: SIDEBAR_HINT_FG,
+                bg: SIDEBAR_BG,
+                ..CellStyle::default()
+            };
+            let label = format!(" {}", root_name);
+            put_sidebar_text(&mut self.screen, 1, 0, content_width, &label, root_style);
+        }
+
+        // ── Entries ──
+        let list_top = 2;
+        let list_height = content_rows.saturating_sub(list_top);
+        if list_height == 0 {
+            return;
+        }
+        let max_scroll = tree.rows.len().saturating_sub(list_height);
+        let start = tree.scroll_top.min(max_scroll);
+
+        for i in 0..list_height {
+            let idx = start + i;
+            let Some(entry) = tree.rows.get(idx) else {
+                break;
+            };
+            let row = list_top + i;
+            let is_selected = idx == tree.selected;
+            let is_current = tree
+                .current_file
+                .as_deref()
+                .is_some_and(|p| p == entry.path.as_path());
+            let mut style = CellStyle {
+                fg: if entry.is_dir {
+                    SIDEBAR_DIR_FG
+                } else {
+                    SIDEBAR_FG
+                },
+                bg: SIDEBAR_BG,
+                ..CellStyle::default()
+            };
+            if is_selected {
+                style.bg = if tree.focused {
+                    SIDEBAR_SELECTED_FOCUS_BG
+                } else {
+                    SIDEBAR_SELECTED_BG
+                };
+                style.fg = Color::White;
+            }
+            if is_current {
+                style.fg = SIDEBAR_CURRENT_FG;
+                style.bold = true;
+            }
+            for col in 0..content_width {
+                self.screen.set_cell(row, col, ' ', style);
+            }
+
+            let indent = "  ".repeat(entry.depth.min(16));
+            let marker = if entry.is_dir {
+                if entry.expanded {
+                    "▾ "
+                } else {
+                    "▸ "
+                }
+            } else {
+                "  "
+            };
+            let text = format!(" {}{}{}", indent, marker, entry.name);
+            put_sidebar_text(&mut self.screen, row, 0, content_width, &text, style);
+        }
+
+        // ── Empty / error state ──
+        if tree.rows.is_empty() {
+            let (text, style) = match tree.error.as_deref() {
+                Some(err) => (
+                    format!(" {}", err),
+                    CellStyle {
+                        fg: Color::Red,
+                        bg: SIDEBAR_BG,
+                        ..CellStyle::default()
+                    },
+                ),
+                None => (
+                    " (empty)".to_string(),
+                    CellStyle {
+                        fg: SIDEBAR_HINT_FG,
+                        bg: SIDEBAR_BG,
+                        ..CellStyle::default()
+                    },
+                ),
+            };
+            put_sidebar_text(&mut self.screen, list_top, 0, content_width, &text, style);
         }
     }
 
@@ -676,8 +838,6 @@ impl Renderer {
                 .as_ref()
                 .map(|c| c.message.clone())
                 .unwrap_or_default()
-        } else if state.show_dashboard {
-            " DASHBOARD ".to_string()
         } else {
             let mode_label = mode_label(state);
 
@@ -821,6 +981,28 @@ impl Default for Renderer {
 }
 
 // ── Free helper functions ──
+
+/// Write `text` into `row` starting at `col`, stopping before `max_cols`
+/// columns have been used. Returns the number of columns consumed.
+fn put_sidebar_text(
+    screen: &mut ScreenBuffer,
+    row: usize,
+    col: usize,
+    max_cols: usize,
+    text: &str,
+    style: CellStyle,
+) -> usize {
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > max_cols {
+            break;
+        }
+        screen.set_cell(row, col + used, ch, style);
+        used += width;
+    }
+    used
+}
 
 /// Display width of `ch` when rendered at `col` within its (wrapped) row.
 ///

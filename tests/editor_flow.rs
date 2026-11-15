@@ -801,7 +801,7 @@ async fn emacs_ctrl_x_d_is_undefined() {
 
     assert_eq!(
         ed.engine.state.cursor.col, 2,
-        "C-x d must not move point (dired is not implemented)"
+        "C-x C-d must not move point (undefined sequence)"
     );
     assert!(
         ed.engine
