@@ -9,6 +9,7 @@ A minimal Vim-like TUI editor written in Rust.
 - Registers (yank/paste)
 - Undo/Redo
 - Syntax highlighting (syntect)
+- VSCode-style file-tree explorer at the left edge
 - Multi-language plugin support (Lua, Lisp, JavaScript, Rust, Nix)
 - Review mode: git diff browsing, hunk/file staging, multi-line comments,
   search and file filtering
@@ -25,6 +26,26 @@ ijevim emacs
 # Open a file (defaults to Vim keymap)
 ijevim <file>
 ```
+
+## File explorer
+
+The file tree is shown on the left edge by default. It starts on the current
+working directory (or the opened file's directory) and remembers expanded
+folders while the editor is running.
+
+| Key | Action |
+| --- | --- |
+| `F2` | show / hide the explorer |
+| `F3` | move focus into the explorer / back to the editor |
+| `j` / `k`, arrow keys | move |
+| `h` / `l`, left / right | collapse / expand |
+| `Enter` | open a file or toggle a directory |
+| `g` / `G` | first / last entry |
+| `r` | re-read the directory |
+| `q` / `Esc` | return focus to the editor |
+
+Set `file_tree = false` in `~/.config/ijevim/config.toml` to start with the
+explorer hidden; `F2` shows it at any time.
 
 ## Review mode
 

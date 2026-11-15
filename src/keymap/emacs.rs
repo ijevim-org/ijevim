@@ -229,8 +229,7 @@ impl KeymapHandler for EmacsKeymap {
                             true
                         }
                         (false, KeyCode::Char('d')) => {
-                            let default = default_directory(editor);
-                            start_command_line_with_text(editor, &format!("e {}", default));
+                            editor.focus_file_tree();
                             true
                         }
                         // ── Windows ──
@@ -287,41 +286,6 @@ impl KeymapHandler for EmacsKeymap {
                     }
                 }
                 return;
-            }
-
-            // ── Dired (directory listing) ──
-            // Emacs dired keys override the normal text bindings here:
-            // Enter visits the entry, `g` reverts, `^` goes up, `q` quits.
-            if editor.engine.buffer.is_directory_listing() && !has_ctrl && !has_alt {
-                let handled = match key {
-                    KeyCode::Enter => {
-                        editor.open_selected_entry();
-                        true
-                    }
-                    KeyCode::Char('g') => {
-                        editor.refresh_directory();
-                        true
-                    }
-                    KeyCode::Char('^') => {
-                        editor.go_up_directory();
-                        true
-                    }
-                    KeyCode::Char('q') => {
-                        if editor.engine.window_layout.windows.len() > 1 {
-                            if let Err(e) = editor.engine.close_focused_window() {
-                                editor.engine.state.push_message(MessageLevel::Error, e);
-                            }
-                        } else if let Err(e) = editor.engine.buffer_delete() {
-                            editor.engine.state.push_message(MessageLevel::Error, e);
-                        }
-                        editor.needs_render = true;
-                        true
-                    }
-                    _ => false,
-                };
-                if handled {
-                    return;
-                }
             }
 
             // ── Numeric argument (`C-u`, `M-3`, `M--`) ──

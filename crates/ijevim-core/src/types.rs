@@ -53,6 +53,11 @@ pub struct WindowLayout {
     pub windows: Vec<Window>,
     /// Index of the currently focused window.
     pub focused: usize,
+    /// Columns reserved at the left edge (the file-tree sidebar).
+    ///
+    /// Windows are laid out inside `[inset_left, terminal_cols)`. Keeping this
+    /// on the layout means a terminal resize preserves the sidebar offset.
+    pub inset_left: usize,
 }
 
 impl WindowLayout {
@@ -71,6 +76,7 @@ impl WindowLayout {
                 buf_idx: 0,
             }],
             focused: 0,
+            inset_left: 0,
         }
     }
 
@@ -130,15 +136,24 @@ impl WindowLayout {
     pub fn resize(&mut self, rows: usize, cols: usize) {
         if self.windows.is_empty() {
             *self = WindowLayout::new_single(rows, cols);
+            self.inset_left = 0;
             return;
         }
         let content_rows = rows.saturating_sub(1);
+        let inset = self.inset_left.min(cols.saturating_sub(1));
         let old_rows = self.windows.iter().map(|w| w.row_end).max().unwrap_or(0);
-        let old_cols = self.windows.iter().map(|w| w.col_end).max().unwrap_or(0);
-        if old_rows == 0 || old_cols == 0 {
+        let old_content_cols = self
+            .windows
+            .iter()
+            .map(|w| w.col_end)
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(inset);
+        let new_content_cols = cols.saturating_sub(inset);
+        if old_rows == 0 || old_content_cols == 0 {
             return;
         }
-        if old_rows == content_rows && old_cols == cols {
+        if old_rows == content_rows && old_content_cols == new_content_cols {
             return;
         }
 
@@ -148,12 +163,22 @@ impl WindowLayout {
         let scale =
             |v: usize, old: NonZeroUsize, new: usize| -> usize { v.saturating_mul(new) / old };
         let old_rows = NonZeroUsize::new(old_rows).expect("checked above");
-        let old_cols = NonZeroUsize::new(old_cols).expect("checked above");
+        let old_content_cols = NonZeroUsize::new(old_content_cols).expect("checked above");
         for w in &mut self.windows {
             w.row_start = scale(w.row_start, old_rows, content_rows);
             w.row_end = scale(w.row_end, old_rows, content_rows);
-            w.col_start = scale(w.col_start, old_cols, cols);
-            w.col_end = scale(w.col_end, old_cols, cols);
+            w.col_start = inset
+                + scale(
+                    w.col_start.saturating_sub(inset),
+                    old_content_cols,
+                    new_content_cols,
+                );
+            w.col_end = inset
+                + scale(
+                    w.col_end.saturating_sub(inset),
+                    old_content_cols,
+                    new_content_cols,
+                );
         }
 
         // A collapsed window would be invisible and unfocusable.
@@ -163,6 +188,45 @@ impl WindowLayout {
             .any(|w| w.row_end <= w.row_start || w.col_end <= w.col_start)
         {
             self.equalize(rows, cols);
+        }
+    }
+
+    /// Reserve `inset` columns at the left edge for the file-tree sidebar.
+    ///
+    /// Existing splits are re-tiled inside the remaining content area so only
+    /// the editor region shrinks; `total_cols` is the full terminal width.
+    pub fn set_inset_left(&mut self, inset: usize, total_cols: usize) {
+        if self.windows.is_empty() {
+            return;
+        }
+        let inset = inset.min(total_cols.saturating_sub(1));
+        let old_inset = self.inset_left.min(total_cols.saturating_sub(1));
+        if inset == old_inset {
+            return;
+        }
+        let old_content_cols = self
+            .windows
+            .iter()
+            .map(|w| w.col_end)
+            .max()
+            .unwrap_or(total_cols)
+            .saturating_sub(old_inset)
+            .max(1);
+        let new_content_cols = total_cols.saturating_sub(inset).max(1);
+        for w in &mut self.windows {
+            let start = w.col_start.saturating_sub(old_inset);
+            let end = w.col_end.saturating_sub(old_inset);
+            w.col_start = inset + start.saturating_mul(new_content_cols) / old_content_cols;
+            w.col_end = inset + end.saturating_mul(new_content_cols) / old_content_cols;
+        }
+        self.inset_left = inset;
+        if self.windows.iter().any(|w| w.col_end <= w.col_start) {
+            // Extremely narrow content area: give the focused window whatever
+            // remains instead of leaving every window collapsed.
+            if let Some(w) = self.windows.get_mut(self.focused) {
+                w.col_start = inset;
+                w.col_end = total_cols;
+            }
         }
     }
 
@@ -187,7 +251,7 @@ impl WindowLayout {
         let max_col = self.windows.iter().map(|w| w.col_end).max().unwrap_or(0);
         let mut kept = self.windows[self.focused].clone();
         kept.row_start = 0;
-        kept.col_start = 0;
+        kept.col_start = self.inset_left;
         kept.row_end = max_row;
         kept.col_end = max_col;
         self.windows = vec![kept];
@@ -265,6 +329,8 @@ impl WindowLayout {
     /// Equalize all window sizes.
     pub fn equalize(&mut self, total_rows: usize, total_cols: usize) {
         let content_rows = total_rows.saturating_sub(1);
+        let inset = self.inset_left.min(total_cols.saturating_sub(1));
+        let content_cols = total_cols.saturating_sub(inset);
         let n = self.windows.len();
         if n == 0 {
             return;
@@ -286,14 +352,14 @@ impl WindowLayout {
                 w.row_start = row;
                 w.row_end = row + h;
                 row += h;
-                w.col_start = 0;
+                w.col_start = inset;
                 w.col_end = total_cols;
             }
         } else {
             // Vertical layout: equalize widths
-            let base_width = total_cols / n;
-            let extra = total_cols % n;
-            let mut col = 0;
+            let base_width = content_cols / n;
+            let extra = content_cols % n;
+            let mut col = inset;
             for (i, w) in self.windows.iter_mut().enumerate() {
                 let w_w = base_width + if i < extra { 1 } else { 0 };
                 w.col_start = col;
@@ -316,7 +382,7 @@ impl WindowLayout {
     /// Maximize focused window horizontally.
     pub fn maximize_horizontal(&mut self, _total_rows: usize, total_cols: usize) {
         let focused = &mut self.windows[self.focused];
-        focused.col_start = 0;
+        focused.col_start = self.inset_left;
         focused.col_end = total_cols;
     }
 }
@@ -539,6 +605,58 @@ pub struct Position {
     pub col: usize,
 }
 
+/// One visible row of the file-tree sidebar.
+#[derive(Debug, Clone)]
+pub struct FileTreeRow {
+    /// Display name (file or directory name, without a trailing slash).
+    pub name: String,
+    /// Absolute path of the entry.
+    pub path: PathBuf,
+    /// Nesting depth relative to the sidebar root (root children are 0).
+    pub depth: usize,
+    /// True if this entry is a directory.
+    pub is_dir: bool,
+    /// True if a directory is expanded.
+    pub expanded: bool,
+}
+
+/// VSCode-style file explorer state shown at the left edge of the screen.
+#[derive(Debug, Clone, Default)]
+pub struct FileTreeState {
+    /// Root directory displayed by the sidebar.
+    pub root: PathBuf,
+    /// Flattened list of visible rows (expanded directories contribute children).
+    pub rows: Vec<FileTreeRow>,
+    /// Index into `rows` of the highlighted entry.
+    pub selected: usize,
+    /// First visible row index (scroll offset).
+    pub scroll_top: usize,
+    /// Directories expanded by the user.
+    pub expanded: Vec<PathBuf>,
+    /// Whether the sidebar is currently shown.
+    pub visible: bool,
+    /// Whether keyboard focus is on the sidebar.
+    pub focused: bool,
+    /// Absolute path of the file currently shown in the editor, when known.
+    pub current_file: Option<PathBuf>,
+    /// Last directory-read error, if any.
+    pub error: Option<String>,
+}
+
+impl FileTreeState {
+    /// Sidebar width for a terminal of `cols` columns.
+    ///
+    /// Returns 0 when the terminal is too narrow to afford a sidebar; callers
+    /// then reserve no space for it.
+    pub fn width_for(cols: usize) -> usize {
+        if cols < 50 {
+            0
+        } else {
+            (cols / 4).clamp(20, 36)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EditorState {
     pub mode: Mode,
@@ -579,8 +697,8 @@ pub struct EditorState {
     pub scrolloff: usize,
     /// Message history (max 100 entries).
     pub message_history: VecDeque<EditorMessage>,
-    /// Show the welcome dashboard instead of an empty buffer.
-    pub show_dashboard: bool,
+    /// File-tree sidebar (left edge, VSCode-style explorer).
+    pub file_tree: FileTreeState,
     /// Current incremental-search match: (line, start_col, end_col exclusive).
     pub incsearch_match: Option<(usize, usize, usize)>,
     /// Extra hint appended to the command line (search count, completion).
@@ -618,22 +736,11 @@ impl Default for EditorState {
             expandtab: false,
             scrolloff: 0,
             message_history: VecDeque::new(),
-            show_dashboard: false,
+            file_tree: FileTreeState::default(),
             incsearch_match: None,
             command_hint: None,
         }
     }
-}
-
-/// A single entry in a directory listing buffer.
-#[derive(Debug, Clone)]
-pub struct DirEntry {
-    /// Display name (e.g. "dir_name/" for directories).
-    pub name: String,
-    /// Absolute path of the entry.
-    pub path: PathBuf,
-    /// True if this entry is a directory.
-    pub is_dir: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -904,6 +1011,29 @@ mod tests {
         let before = bounds(&layout);
         layout.resize(24, 80);
         assert_eq!(bounds(&layout), before);
+    }
+
+    #[test]
+    fn inset_left_shrinks_windows_and_survives_resize() {
+        let mut layout = WindowLayout::new_single(24, 80);
+        layout.split_vertical();
+
+        layout.set_inset_left(30, 80);
+        assert_eq!(layout.inset_left, 30);
+        assert_eq!(layout.windows[0].col_start, 30);
+        assert_eq!(layout.windows[1].col_end, 80);
+        assert_eq!(layout.windows[0].col_end, layout.windows[1].col_start);
+
+        layout.resize(30, 120);
+        assert_eq!(layout.inset_left, 30);
+        assert_eq!(layout.windows[0].col_start, 30);
+        assert_eq!(layout.windows[1].col_end, 120);
+        assert_eq!(layout.windows[0].col_end, layout.windows[1].col_start);
+
+        layout.set_inset_left(0, 120);
+        assert_eq!(layout.inset_left, 0);
+        assert_eq!(layout.windows[0].col_start, 0);
+        assert_eq!(layout.windows[1].col_end, 120);
     }
 
     #[test]

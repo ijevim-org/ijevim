@@ -423,12 +423,13 @@ async fn c_x_b_opens_a_buffer_prompt() {
 }
 
 #[tokio::test]
-async fn c_x_d_opens_a_dired_prompt() {
+async fn c_x_d_focuses_the_file_tree() {
     let mut e = ed("x\n");
     ctrl(&mut e, 'x').await;
     press(&mut e, KeyCode::Char('d'), KeyModifiers::NONE).await;
-    assert_eq!(e.engine.state.mode, Mode::Command);
-    assert!(e.engine.state.command_buffer.starts_with("e "));
+    assert!(e.engine.state.file_tree.visible);
+    assert!(e.engine.state.file_tree.focused);
+    assert_eq!(e.engine.state.mode, Mode::Normal);
 }
 
 #[tokio::test]
@@ -650,63 +651,4 @@ async fn meta_n_and_meta_p_repeat_the_last_search() {
     alt(&mut e, 'p').await;
     assert_eq!(e.engine.state.cursor, Position { line: 1, col: 8 });
     assert_eq!(e.engine.buffer.to_string(), "one two one\n");
-}
-
-// ── Dired ──────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn dired_enter_opens_the_selected_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let file = dir.path().join("a.txt");
-    std::fs::write(&file, "alpha\n").expect("write file");
-
-    let mut e = ed("scratch\n");
-    e.engine
-        .buffer_open_dir(dir.path().to_str().unwrap())
-        .expect("open dir");
-    assert!(e.engine.buffer.is_directory_listing());
-
-    press(&mut e, KeyCode::Enter, KeyModifiers::NONE).await;
-    assert_eq!(e.engine.buffer.to_string(), "alpha\n");
-    assert_eq!(e.engine.state.file_path.as_deref(), Some(file.as_path()));
-}
-
-#[tokio::test]
-async fn dired_g_reverts_and_caret_goes_up() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("a.txt"), "a\n").expect("write file");
-    let sub = dir.path().join("sub");
-    std::fs::create_dir(&sub).expect("mkdir");
-
-    let mut e = ed("scratch\n");
-    e.engine
-        .buffer_open_dir(sub.to_str().unwrap())
-        .expect("open subdir");
-
-    press(&mut e, KeyCode::Char('g'), KeyModifiers::NONE).await;
-    assert!(e.engine.buffer.is_directory_listing());
-    assert_eq!(
-        e.engine.buffer.dir_path().map(|p| p.to_path_buf()),
-        Some(sub.clone())
-    );
-
-    press(&mut e, KeyCode::Char('^'), KeyModifiers::NONE).await;
-    assert_eq!(
-        e.engine.buffer.dir_path().map(|p| p.to_path_buf()),
-        Some(dir.path().to_path_buf())
-    );
-}
-
-#[tokio::test]
-async fn dired_q_closes_the_listing() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("a.txt"), "a\n").expect("write file");
-
-    let mut e = ed("scratch\n");
-    e.engine
-        .buffer_open_dir(dir.path().to_str().unwrap())
-        .expect("open dir");
-
-    press(&mut e, KeyCode::Char('q'), KeyModifiers::NONE).await;
-    assert!(!e.engine.buffer.is_directory_listing());
 }

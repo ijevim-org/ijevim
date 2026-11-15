@@ -42,7 +42,7 @@ fn test_editor(keymap: Keymap) -> Editor {
         expandtab: false,
         scrolloff: 0,
         message_history: VecDeque::new(),
-        show_dashboard: false,
+        file_tree: Default::default(),
         incsearch_match: None,
         command_hint: None,
     };

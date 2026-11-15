@@ -1,4 +1,4 @@
-use crate::types::{DirEntry, IjevimError, Result};
+use crate::types::{IjevimError, Result};
 use ropey::Rope;
 use std::path::{Path, PathBuf};
 
@@ -10,10 +10,6 @@ pub struct TextBuffer {
     dirty: bool,
     modification_count: usize,
     pub(crate) saved_modification_count: usize,
-    /// If set, this buffer shows a directory listing (file browser).
-    dir_path: Option<PathBuf>,
-    /// Cached directory entries for navigation. Index i corresponds to line i+1.
-    dir_entries: Vec<DirEntry>,
 }
 
 impl TextBuffer {
@@ -24,8 +20,6 @@ impl TextBuffer {
             dirty: false,
             modification_count: 0,
             saved_modification_count: 0,
-            dir_path: None,
-            dir_entries: Vec::new(),
         }
     }
 
@@ -36,8 +30,6 @@ impl TextBuffer {
             dirty: false,
             modification_count: 0,
             saved_modification_count: 0,
-            dir_path: None,
-            dir_entries: Vec::new(),
         }
     }
 
@@ -280,36 +272,6 @@ impl TextBuffer {
     /// different file (e.g., after `:w newpath`).
     pub fn set_file_path(&mut self, path: Option<PathBuf>) {
         self.file_path = path;
-    }
-
-    /// Returns `true` if this buffer contains a directory listing (file browser).
-    pub fn is_directory_listing(&self) -> bool {
-        self.dir_path.is_some()
-    }
-
-    /// Returns the directory path if this is a directory listing buffer.
-    pub fn dir_path(&self) -> Option<&Path> {
-        self.dir_path.as_deref()
-    }
-
-    /// Returns the cached directory entries for navigation.
-    /// Entry at index `i` corresponds to buffer line `i + 1`.
-    pub fn dir_entries(&self) -> &[DirEntry] {
-        &self.dir_entries
-    }
-
-    /// Return the directory entry at the given buffer line (1-indexed).
-    pub fn selected_entry(&self, line: usize) -> Option<&DirEntry> {
-        if line < 1 || line > self.dir_entries.len() {
-            return None;
-        }
-        self.dir_entries.get(line - 1)
-    }
-
-    /// Mark this buffer as a directory listing with the given entries and path.
-    pub fn set_dir_listing(&mut self, entries: Vec<DirEntry>, path: PathBuf) {
-        self.dir_entries = entries;
-        self.dir_path = Some(path);
     }
 
     /// Single point of truth for marking the buffer as modified. All mutation

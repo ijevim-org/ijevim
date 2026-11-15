@@ -3,11 +3,6 @@ use crate::types::{ConfirmAction, MessageLevel};
 
 impl Editor {
     pub(super) async fn reload_file(&mut self) {
-        // Directory listings cannot be reloaded as text files — refresh instead.
-        if self.engine.buffer.is_directory_listing() {
-            self.refresh_directory();
-            return;
-        }
         if let Some(path) = &self.engine.state.file_path {
             match crate::buffer::TextBuffer::load_file(path.to_str().unwrap_or("")).await {
                 Ok(buf) => {

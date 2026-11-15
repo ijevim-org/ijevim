@@ -81,24 +81,13 @@ impl Editor {
                         }
                         self.needs_render = true;
                     }
-                    "Ex" | "Explore" => {
-                        self.engine.state.show_dashboard = false;
-                        match std::env::current_dir() {
-                            Ok(cwd) => {
-                                let path = cwd.to_string_lossy().to_string();
-                                if let Err(e) = self.engine.buffer_open_dir(&path) {
-                                    self.engine.state.push_message(MessageLevel::Error, e);
-                                }
-                            }
-                            Err(e) => {
-                                self.engine.state.push_message(
-                                    MessageLevel::Error,
-                                    format!("Cannot get current directory: {}", e),
-                                );
-                            }
-                        }
-                        self.needs_render = true;
-                    }
+                    "Ex" | "Explore" => match std::env::current_dir() {
+                        Ok(cwd) => self.set_file_tree_root(&cwd),
+                        Err(e) => self.engine.state.push_message(
+                            MessageLevel::Error,
+                            format!("Cannot get current directory: {}", e),
+                        ),
+                    },
                     "ls" | "buffers" => {
                         let list = self.engine.buffer_list();
                         self.engine.state.push_message(MessageLevel::Info, list);
@@ -159,7 +148,6 @@ impl Editor {
                         }
                     }
                     cmd if cmd.starts_with("e ") || cmd == "e." => {
-                        self.engine.state.show_dashboard = false;
                         let path = if cmd == "e." {
                             "."
                         } else {
@@ -167,9 +155,7 @@ impl Editor {
                         };
                         let p = std::path::Path::new(path);
                         if p.is_dir() {
-                            if let Err(e) = self.engine.buffer_open_dir(path) {
-                                self.engine.state.push_message(MessageLevel::Error, e);
-                            }
+                            self.set_file_tree_root(p);
                         } else if let Err(e) = self.engine.buffer_open(path) {
                             self.engine.state.push_message(MessageLevel::Error, e);
                         }
