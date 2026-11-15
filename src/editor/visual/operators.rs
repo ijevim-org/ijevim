@@ -24,6 +24,7 @@ impl Editor {
         };
         self.engine.state.cursor = pos;
         self.engine.insert_state.accum.clear();
+        self.engine.insert_state.session_edits.clear();
         self.engine.insert_state.start_pos = Some(pos);
         self.exit_visual(Mode::Insert);
     }
@@ -47,6 +48,7 @@ impl Editor {
         };
         self.engine.state.cursor = pos;
         self.engine.insert_state.accum.clear();
+        self.engine.insert_state.session_edits.clear();
         self.engine.insert_state.start_pos = Some(pos);
         self.exit_visual(Mode::Insert);
     }
@@ -188,7 +190,9 @@ impl Editor {
             .state
             .visual_type
             .unwrap_or(VisualType::Character);
-        let cursor_before = self.engine.state.cursor;
+        // Vim restores the cursor to the start of the deleted selection on
+        // undo, not to the (possibly later) position the cursor moved to.
+        let cursor_before = start;
         let mod_count = self.engine.buffer.modification_count();
         let mut edits: Vec<Edit> = Vec::new();
 

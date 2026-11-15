@@ -4,7 +4,7 @@ use crate::plugin::PluginManager;
 use crate::register::Register;
 use crate::review::ReviewState;
 use crate::state::{CursorState, EmacsState, InsertState, OperatorState, SearchState};
-use crate::types::{ConfirmAction, DotAction, EditorState, KillRing, Mode, Position};
+use crate::types::{ConfirmAction, DotAction, EditorState, Keymap, KillRing, Mode, Position};
 use crate::undo::UndoManager;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::path::PathBuf;
@@ -173,9 +173,25 @@ impl Engine {
             .emit(crate::types::PluginEvent::BufferChange);
     }
 
+    /// Restore a cursor recorded by the undo tree.
+    ///
+    /// Vim's Normal mode never rests past the last character, but an Insert
+    /// session can start at the end-of-line column (`A`, `o`); without this
+    /// clamp, undoing such a session leaves a Normal-mode cursor one column
+    /// past the line, which the renderer/motions then have to defend against.
+    fn restore_undo_cursor(&mut self, pos: Position) {
+        let line = pos.line.clamp(1, self.buffer.content_line_count().max(1));
+        let col = if self.state.keymap == Keymap::Vim {
+            pos.col.min(self.buffer.line_max_col(line))
+        } else {
+            pos.col.min(self.buffer.line_content_len(line))
+        };
+        self.state.cursor = Position { line, col };
+    }
+
     pub(crate) fn undo(&mut self) -> EngineResult {
         if let Some(edit) = self.undo_manager.undo(&mut self.buffer) {
-            self.state.cursor = edit.cursor_before;
+            self.restore_undo_cursor(edit.cursor_before);
             self.state.dirty = self.buffer.is_dirty();
             EngineResult::with_render()
         } else {
@@ -185,7 +201,7 @@ impl Engine {
 
     pub(crate) fn redo(&mut self) -> EngineResult {
         if let Some(edit) = self.undo_manager.redo(&mut self.buffer) {
-            self.state.cursor = edit.cursor_after;
+            self.restore_undo_cursor(edit.cursor_after);
             self.state.dirty = self.buffer.is_dirty();
             EngineResult::with_render()
         } else {

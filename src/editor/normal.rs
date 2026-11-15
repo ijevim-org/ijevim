@@ -74,9 +74,12 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('i') => {
-                let _count = self.take_count();
+                let count = self.take_count();
+                self.engine.insert_state.repeat_count = (count > 1).then_some(count);
                 let prev_mode = self.engine.state.mode;
                 self.engine.insert_state.accum.clear();
+                self.engine.insert_state.session_edits.clear();
+                self.engine.insert_state.repeat = Some(crate::types::InsertRepeat::Inline);
                 self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
                 self.engine.state.mode = Mode::Insert;
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
@@ -86,11 +89,14 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('I') => {
-                let _count = self.take_count();
+                let count = self.take_count();
+                self.engine.insert_state.repeat_count = (count > 1).then_some(count);
                 let line = self.engine.state.cursor.line;
                 self.engine.state.cursor.col = self.first_non_blank_col(line);
                 let prev_mode = self.engine.state.mode;
                 self.engine.insert_state.accum.clear();
+                self.engine.insert_state.session_edits.clear();
+                self.engine.insert_state.repeat = Some(crate::types::InsertRepeat::LineStart);
                 self.engine.insert_state.start_pos = Some(self.engine.state.cursor);
                 self.engine.state.mode = Mode::Insert;
                 self.engine.plugin_manager.emit(PluginEvent::ModeChange {
@@ -100,9 +106,12 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('a') => {
-                let _count = self.take_count();
+                let count = self.take_count();
+                self.engine.insert_state.repeat_count = (count > 1).then_some(count);
                 let prev_mode = self.engine.state.mode;
                 self.engine.insert_state.accum.clear();
+                self.engine.insert_state.session_edits.clear();
+                self.engine.insert_state.repeat = Some(crate::types::InsertRepeat::Append);
                 if self.engine.state.cursor.col
                     < self
                         .engine
@@ -120,9 +129,12 @@ impl Editor {
                 self.needs_render = true;
             }
             KeyCode::Char('A') => {
-                let _count = self.take_count();
+                let count = self.take_count();
+                self.engine.insert_state.repeat_count = (count > 1).then_some(count);
                 let prev_mode = self.engine.state.mode;
                 self.engine.insert_state.accum.clear();
+                self.engine.insert_state.session_edits.clear();
+                self.engine.insert_state.repeat = Some(crate::types::InsertRepeat::LineEnd);
                 let line_len = self
                     .engine
                     .buffer
@@ -173,6 +185,10 @@ impl Editor {
             }
             KeyCode::Char('C') => {
                 let count = self.take_count();
+                if count > 1 && self.engine.buffer.content_line_count() == 1 {
+                    self.needs_render = true;
+                    return;
+                }
                 let at = self.engine.state.cursor;
                 let marker = self.undo_marker();
                 self.delete_to_line_end('"', count);
@@ -325,6 +341,7 @@ impl Editor {
             }
             KeyCode::Char('y') => {
                 let register = self.engine.operator_state.register.take();
+                self.engine.operator_state.operator_count = self.engine.operator_state.count.take();
                 self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
                     op: Operator::Yank,
                     register,
@@ -339,6 +356,7 @@ impl Editor {
             }
             KeyCode::Char('d') => {
                 let register = self.engine.operator_state.register.take();
+                self.engine.operator_state.operator_count = self.engine.operator_state.count.take();
                 self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
                     op: Operator::Delete,
                     register,
@@ -499,17 +517,21 @@ impl Editor {
                     self.needs_render = true;
                 }
                 KeyCode::Char('o') => {
-                    let _count = self.take_count();
+                    let count = self.take_count();
                     self.open_line(false);
+                    self.engine.insert_state.repeat_count = (count > 1).then_some(count);
                     self.needs_render = true;
                 }
                 KeyCode::Char('O') => {
-                    let _count = self.take_count();
+                    let count = self.take_count();
                     self.open_line(true);
+                    self.engine.insert_state.repeat_count = (count > 1).then_some(count);
                     self.needs_render = true;
                 }
                 KeyCode::Char('c') => {
                     let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.operator_count =
+                        self.engine.operator_state.count.take();
                     self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
                         op: Operator::Change,
                         register,
@@ -525,6 +547,8 @@ impl Editor {
                 }
                 KeyCode::Char('>') => {
                     let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.operator_count =
+                        self.engine.operator_state.count.take();
                     self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
                         op: Operator::IndentRight,
                         register,
@@ -532,6 +556,8 @@ impl Editor {
                 }
                 KeyCode::Char('<') => {
                     let register = self.engine.operator_state.register.take();
+                    self.engine.operator_state.operator_count =
+                        self.engine.operator_state.count.take();
                     self.engine.operator_state.pending = PendingOperator::AwaitingOperator {
                         op: Operator::IndentLeft,
                         register,

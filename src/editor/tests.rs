@@ -437,7 +437,7 @@ async fn quote_text_object_works_when_cursor_is_on_opening_quote() {
     editor
         .handle_text_object(KeyCode::Char('"'), '"', false)
         .await;
-    assert_eq!(editor.engine.buffer.get_line(1), "let x = ;\n");
+    assert_eq!(editor.engine.buffer.get_line(1), "let x =;\n");
 }
 
 #[test]

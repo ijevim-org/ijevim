@@ -257,12 +257,14 @@ impl UndoManager {
         if target == self.current {
             return None;
         }
-        // Check if target is parent
+        // Check if target is parent. Undo the *current* node's edit (the
+        // step being reversed), not the parent's edit, which is older.
         if self.nodes[self.current].parent == Some(target) {
-            self.apply_undo(buffer, &edit);
+            let current_edit = self.nodes[self.current].edit.clone();
+            self.apply_undo(buffer, &current_edit);
             self.current = target;
-            buffer.reset_modification_count(edit.modification_count);
-            return Some(edit);
+            buffer.reset_modification_count(current_edit.modification_count);
+            return Some(current_edit);
         }
         // Check if target is a child
         if self.nodes[self.current].children.contains(&target) {
@@ -389,7 +391,9 @@ impl UndoManager {
                 line,
                 deleted_newline_col: _,
             } => {
-                buffer.merge_with_prev_line(*line);
+                // `line` is the line that absorbed the next one, so redo must
+                // merge the following line into it.
+                buffer.merge_with_prev_line(*line + 1);
             }
             EditType::Split { line, col } => {
                 buffer.insert(*line, *col, "\n");

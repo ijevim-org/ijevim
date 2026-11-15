@@ -31,7 +31,10 @@ impl Editor {
         target: (usize, usize),
     ) -> (usize, usize) {
         let (line, col) = target;
-        if line > from_line && col == 0 {
+        // Vim only folds the line break into the motion when the target is on
+        // the line directly below the start. Further away the exclusive end
+        // includes the intervening newlines (e.g. `d4w` across two breaks).
+        if line == from_line + 1 && col == 0 {
             (line - 1, self.line_content_len(line - 1))
         } else {
             target
@@ -46,6 +49,7 @@ impl Editor {
         to_word_end: bool,
     ) -> (usize, usize) {
         let (mut line, mut col) = (self.engine.state.cursor.line, self.engine.state.cursor.col);
+        let mut exhausted = false;
         for _ in 0..count.max(1) {
             let next = if to_word_end {
                 self.word_end_pos(line, col, big)
@@ -53,12 +57,19 @@ impl Editor {
                 self.word_forward_pos(line, col, big)
             };
             if next == (line, col) {
+                exhausted = true;
                 break;
             }
             line = next.0;
             col = next.1;
         }
-        (line, col)
+        if exhausted && !to_word_end {
+            // The count ran past the last word: an operator delete/yank
+            // extends through that word to the end of the line.
+            (line, self.line_content_len(line))
+        } else {
+            (line, col)
+        }
     }
 
     /// Target of `{count}b` / `{count}B`, crossing lines.

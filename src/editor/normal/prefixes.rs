@@ -100,6 +100,12 @@ impl Editor {
                 register,
                 inner,
             } => {
+                // `2diw` / `d2iw` / `2d2iw`: multiply the count typed before
+                // the operator with the one typed before the text object.
+                if let Some(pre) = self.engine.operator_state.operator_count.take() {
+                    let post = self.engine.operator_state.count.take().unwrap_or(1);
+                    self.engine.operator_state.count = Some(pre.saturating_mul(post));
+                }
                 match op {
                     Operator::Yank | Operator::Delete => {
                         self.handle_text_object(key, register, inner).await;
@@ -127,7 +133,14 @@ impl Editor {
                     }
                 }
                 self.engine.operator_state.register = register;
-                let count = self.take_count();
+                let motion_count = self.take_count();
+                let count = self
+                    .engine
+                    .operator_state
+                    .operator_count
+                    .take()
+                    .unwrap_or(1)
+                    .saturating_mul(motion_count);
                 self.handle_operator(op, key, count).await;
                 true
             }
