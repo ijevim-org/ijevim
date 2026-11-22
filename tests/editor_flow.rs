@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ijevim::editor::Editor;
-use ijevim::types::{Keymap, Mode, PendingOperator, SearchDirection, VisualType};
+use ijevim::types::{FileTreeRow, Keymap, Mode, PendingOperator, SearchDirection, VisualType};
 
 fn test_vim_editor(text: &str) -> Editor {
     let mut editor = Editor::new_headless_for_test(Keymap::Vim).expect("headless editor");
@@ -3471,4 +3471,109 @@ async fn file_tree_keeps_its_own_navigation_keys() {
     assert!(ed.engine.state.file_tree.focused);
     assert_eq!(ed.engine.state.mode, Mode::Normal);
     assert_eq!(ed.snapshot_for_test().1, 1);
+}
+
+#[tokio::test]
+async fn f2_toggles_explorer_visibility() {
+    let mut ed = test_vim_editor("abc\n");
+    assert!(!ed.engine.state.file_tree.visible);
+
+    ed.handle_key_for_test(KeyCode::F(2), KeyModifiers::NONE)
+        .await;
+    assert!(ed.engine.state.file_tree.visible);
+
+    ed.handle_key_for_test(KeyCode::F(2), KeyModifiers::NONE)
+        .await;
+    assert!(!ed.engine.state.file_tree.visible);
+}
+
+#[tokio::test]
+async fn f3_moves_focus_into_and_out_of_explorer() {
+    let mut ed = test_vim_editor("abc\n");
+
+    ed.handle_key_for_test(KeyCode::F(3), KeyModifiers::NONE)
+        .await;
+    assert!(ed.engine.state.file_tree.visible);
+    assert!(ed.engine.state.file_tree.focused);
+
+    ed.handle_key_for_test(KeyCode::F(3), KeyModifiers::NONE)
+        .await;
+    assert!(ed.engine.state.file_tree.visible);
+    assert!(!ed.engine.state.file_tree.focused);
+}
+
+#[tokio::test]
+async fn explorer_enter_opens_the_selected_file_and_returns_focus() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let first = dir.path().join("a.txt");
+    let second = dir.path().join("b.txt");
+    std::fs::write(&first, "alpha\n").unwrap();
+    std::fs::write(&second, "beta\n").unwrap();
+
+    let mut ed = test_vim_editor("seed\n");
+    let tree = &mut ed.engine.state.file_tree;
+    tree.visible = true;
+    tree.focused = true;
+    tree.selected = 0;
+    tree.rows = vec![
+        FileTreeRow {
+            name: "a.txt".into(),
+            path: first.clone(),
+            depth: 0,
+            is_dir: false,
+            expanded: false,
+        },
+        FileTreeRow {
+            name: "b.txt".into(),
+            path: second.clone(),
+            depth: 0,
+            is_dir: false,
+            expanded: false,
+        },
+    ];
+
+    send_keys(&mut ed, "j").await;
+    assert_eq!(ed.engine.state.file_tree.selected, 1);
+    send_keys(&mut ed, "k").await;
+    assert_eq!(ed.engine.state.file_tree.selected, 0);
+
+    ed.handle_key_for_test(KeyCode::Enter, KeyModifiers::NONE)
+        .await;
+
+    assert!(!ed.engine.state.file_tree.focused);
+    assert_eq!(ed.snapshot_for_test().0, "alpha\n");
+    assert_eq!(ed.engine.state.file_path.as_deref(), Some(first.as_path()));
+    assert_eq!(
+        ed.engine.state.file_tree.current_file.as_deref(),
+        Some(first.as_path())
+    );
+}
+
+#[tokio::test]
+async fn explorer_right_and_left_expand_and_collapse_a_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("inner.txt"), "inner\n").unwrap();
+
+    let mut ed = test_vim_editor("seed\n");
+    let tree = &mut ed.engine.state.file_tree;
+    tree.visible = true;
+    tree.focused = true;
+    tree.root = dir.path().to_path_buf();
+    tree.rows = vec![FileTreeRow {
+        name: "sub".into(),
+        path: sub.clone(),
+        depth: 0,
+        is_dir: true,
+        expanded: false,
+    }];
+
+    send_keys(&mut ed, "l").await;
+    assert_eq!(ed.engine.state.file_tree.rows.len(), 2);
+    assert!(ed.engine.state.file_tree.rows[0].expanded);
+
+    send_keys(&mut ed, "h").await;
+    assert_eq!(ed.engine.state.file_tree.rows.len(), 1);
+    assert!(!ed.engine.state.file_tree.rows[0].expanded);
 }

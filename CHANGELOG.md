@@ -22,6 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `n`/`N` navigation, plus case-insensitive file-list filtering with `/`.
 - Review mode arguments: `:review --staged` / `--cached`, `:review <rev>`,
   `:review <rev1>..<rev2>`, and `:review -- <path>`.
+- File-tree explorer sidebar: `F2` toggles it, `F3` moves focus, `j`/`k` move,
+  `h`/`l` collapse/expand, `Enter` opens, `g`/`G` jump and `r` re-reads.
+  `:Ex` and `:e <directory>` now repoint and focus the explorer.
 - README: generated dependency tables (runtime / optional / development, with
   versions, licensing and transitive crate counts). Regenerate with
   `scripts/deps-table.sh --write`; CI verifies it via `--check`.
@@ -39,7 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `C-x C-x` exchange point and mark, `M-x` command line.
 - Emacs files and buffers: `C-x C-f` find-file, `C-x C-w` write-file, `C-x b`
   switch-to-buffer (including the new `:b <name>` command), `C-x k` kill-buffer,
-  and `C-x d` dired.
+  and `C-x d` focuses the file-tree explorer.
 - Emacs windows: `C-x 2` split-below, `C-x 3` split-right, `C-x o` / `C-x O`
   other-window (forward/backward), `C-x 0` delete-window, and `C-x 1`
   delete-other-windows.
@@ -55,9 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   including kill-ring append and undo.
 - Emacs: `M-n` / `M-p` repeat the current search forward/backward (numeric
   arguments supported).
-- Emacs dired: `Enter` visits the entry, `g` reverts the listing, `^` goes to
-  the parent directory, and `q` buries the listing.
-- Tests: `tests/emacs_flow.rs` (44 regression tests) and the opt-in differential
+- Tests: `tests/emacs_flow.rs` (41 regression tests) and the opt-in differential
   harness `tests/emacs_probe.rs` + `scripts/emacs-diff.sh` against `emacs -Q`.
 
 ### Changed
@@ -79,8 +80,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Vim and Emacs modes.
 - Emacs: `C-v` / `M-v` now move by a page (previously half a page), `C-o` opens
   a line (previously saved the file), `C-x h` marks the whole buffer (previously
-  beginning-of-line), `C-x d` opens dired (previously end-of-line), and
-  `C-x u` / `C-x C-/` undo (previously redo).
+  beginning-of-line), `C-x d` focuses the file explorer (previously end-of-line),
+  and `C-x u` / `C-x C-/` undo (previously redo).
+- The welcome dashboard and directory-listing (dired) buffers were removed in
+  favour of the file-tree sidebar. `TextBuffer::is_directory_listing`,
+  `dir_path`, `dir_entries`, `selected_entry` and `set_dir_listing` were removed;
+  `ijevim-core` clients using them should read `EditorState::file_tree`.
 - Emacs: inserts, deletes, kills, yanks and transposes are now undoable.
 - Emacs: `C-k` at the beginning of a line now kills the whole line including
   its newline, matching Emacs (previously it left an empty line behind).
