@@ -422,9 +422,9 @@ impl Editor {
         }
 
         // ── File-tree sidebar ──
-        // F2 toggles the explorer, F3 moves focus in and out. When focused,
-        // every other key belongs to the tree so editor commands cannot leak
-        // into the highlighted entry.
+        // F2 toggles the explorer, F3 moves focus in and out. While focused,
+        // the tree consumes its own keys; anything else drops focus and falls
+        // through to the keymap, as the old welcome dashboard did.
         match key {
             KeyCode::F(2) => {
                 self.toggle_file_tree();
@@ -436,8 +436,7 @@ impl Editor {
             }
             _ => {}
         }
-        if self.engine.state.file_tree.focused {
-            self.handle_file_tree_key(key);
+        if self.engine.state.file_tree.focused && self.handle_file_tree_key(key) {
             return;
         }
 

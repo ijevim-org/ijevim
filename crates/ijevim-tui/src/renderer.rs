@@ -982,8 +982,8 @@ impl Default for Renderer {
 
 // ── Free helper functions ──
 
-/// Write `text` into `row` starting at `col`, stopping before `max_cols`
-/// columns have been used. Returns the number of columns consumed.
+/// Write `text` into `row` starting at `col`, stopping before its display width
+/// would exceed `max_cols`. Returns the number of cells written.
 fn put_sidebar_text(
     screen: &mut ScreenBuffer,
     row: usize,
@@ -992,16 +992,21 @@ fn put_sidebar_text(
     text: &str,
     style: CellStyle,
 ) -> usize {
-    let mut used = 0usize;
+    let mut width = 0usize;
+    let mut cells = 0usize;
     for ch in text.chars() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + width > max_cols {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_cols {
             break;
         }
-        screen.set_cell(row, col + used, ch, style);
-        used += width;
+        // ScreenBuffer holds one char per cell and the terminal advances the
+        // cursor by the glyph's own width when the frame is emitted. Offsetting
+        // by display width here would leave holes after wide characters.
+        screen.set_cell(row, col + cells, ch, style);
+        cells += 1;
+        width += ch_width;
     }
-    used
+    cells
 }
 
 /// Display width of `ch` when rendered at `col` within its (wrapped) row.
@@ -1287,5 +1292,27 @@ mod tests {
     fn tab_does_not_force_wrap_when_it_fits() {
         let rows = wrap_styled(&styled("\tab"), 6, true, 4);
         assert_eq!(rows.len(), 1);
+    }
+
+    /// Wide characters must occupy consecutive cells. Offsetting by display
+    /// width used to leave a blank cell after each CJK glyph.
+    #[test]
+    fn sidebar_text_has_no_holes_after_wide_chars() {
+        let mut screen = ScreenBuffer::new(2, 12);
+        let cells = put_sidebar_text(&mut screen, 0, 0, 10, "aあb", CellStyle::default());
+        assert_eq!(cells, 3);
+        let frame = screen.render();
+        assert!(frame.contains("aあb"), "unexpected frame: {frame:?}");
+    }
+
+    /// Truncation is measured in display columns, even though cells are
+    /// written one character at a time.
+    #[test]
+    fn sidebar_text_truncates_by_display_width() {
+        let mut screen = ScreenBuffer::new(2, 12);
+        let cells = put_sidebar_text(&mut screen, 0, 0, 3, "aあb", CellStyle::default());
+        assert_eq!(cells, 2);
+        let frame = screen.render();
+        assert!(frame.contains("aあ "), "unexpected frame: {frame:?}");
     }
 }

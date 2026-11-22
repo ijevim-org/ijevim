@@ -7,6 +7,7 @@
 use crate::editor::Editor;
 use crate::types::{FileTreeRow, FileTreeState, MessageLevel};
 use crossterm::event::KeyCode;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Entries never shown in the explorer. `.git` is noise; commit history is
@@ -138,29 +139,57 @@ impl Editor {
     }
 
     /// Handle a key while the sidebar has focus. Returns `true` when consumed.
+    ///
+    /// Anything the tree does not own drops focus so the key can reach the
+    /// editor keymap. Without this fall-through, starting without a file would
+    /// leave every key (including `i` and `:`) trapped in the sidebar.
     pub(crate) fn handle_file_tree_key(&mut self, key: KeyCode) -> bool {
-        match key {
-            KeyCode::Char('j') | KeyCode::Down => self.tree_move(1),
-            KeyCode::Char('k') | KeyCode::Up => self.tree_move(-1),
-            KeyCode::Char('h') | KeyCode::Left => self.tree_collapse(),
-            KeyCode::Char('l') | KeyCode::Right => self.tree_expand_selected(),
-            KeyCode::Enter | KeyCode::Char('o') => self.tree_open_selected(),
-            KeyCode::Char('g') => self.tree_select(0),
+        let consumed = match key {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.tree_move(1);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.tree_move(-1);
+                true
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.tree_collapse();
+                true
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.tree_expand_selected();
+                true
+            }
+            KeyCode::Enter | KeyCode::Char('o') => {
+                self.tree_open_selected();
+                true
+            }
+            KeyCode::Char('g') => {
+                self.tree_select(0);
+                true
+            }
             KeyCode::Char('G') => {
                 let last = self.engine.state.file_tree.rows.len().saturating_sub(1);
                 self.tree_select(last);
+                true
             }
             KeyCode::Char('r') => {
                 self.rebuild_file_tree();
                 self.tree_ensure_visible();
+                true
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.engine.state.file_tree.focused = false;
+                true
             }
-            _ => {}
+            _ => false,
+        };
+        if !consumed {
+            self.engine.state.file_tree.focused = false;
         }
         self.needs_render = true;
-        true
+        consumed
     }
 
     // ── Tree model ───────────────────────────────────────────────
@@ -326,7 +355,8 @@ impl Editor {
 fn build_tree_rows(root: &Path, expanded: &[PathBuf]) -> (Vec<FileTreeRow>, Option<String>) {
     let mut rows = Vec::new();
     let mut error = None;
-    walk_tree(root, 0, expanded, &mut rows, &mut error);
+    let mut visited = HashSet::new();
+    walk_tree(root, 0, expanded, &mut visited, &mut rows, &mut error);
     (rows, error)
 }
 
@@ -334,6 +364,7 @@ fn walk_tree(
     dir: &Path,
     depth: usize,
     expanded: &[PathBuf],
+    visited: &mut HashSet<PathBuf>,
     rows: &mut Vec<FileTreeRow>,
     error: &mut Option<String>,
 ) {
@@ -350,24 +381,38 @@ fn walk_tree(
         }
     };
 
-    let mut entries: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
-    entries.sort_by(|a, b| {
-        let a_dir = a.metadata().map(|m| m.is_dir()).unwrap_or(false);
-        let b_dir = b.metadata().map(|m| m.is_dir()).unwrap_or(false);
+    // An expanded symlink back into an ancestor would otherwise duplicate the
+    // whole subtree once per depth level. Canonical paths catch that even when
+    // the link and the ancestor are spelled differently.
+    if let Ok(canonical) = std::fs::canonicalize(dir) {
+        if !visited.insert(canonical) {
+            return;
+        }
+    }
+
+    // `metadata()` follows symlinks (a link to a directory is shown as one).
+    // Resolve it once per entry instead of once per sort comparison.
+    let mut entries: Vec<_> = read_dir
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let is_dir = e.metadata().map(|m| m.is_dir()).unwrap_or(false);
+            (e, is_dir)
+        })
+        .collect();
+    entries.sort_by(|(a, a_dir), (b, b_dir)| {
         if a_dir != b_dir {
-            b_dir.cmp(&a_dir)
+            b_dir.cmp(a_dir)
         } else {
             a.file_name().cmp(&b.file_name())
         }
     });
 
-    for entry in entries {
+    for (entry, is_dir) in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         if SKIPPED_NAMES.contains(&name.as_str()) {
             continue;
         }
         let path = entry.path();
-        let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
         let is_expanded = is_dir && expanded.iter().any(|p| p == &path);
         rows.push(FileTreeRow {
             name,
@@ -377,7 +422,7 @@ fn walk_tree(
             expanded: is_expanded,
         });
         if is_expanded {
-            walk_tree(&path, depth + 1, expanded, rows, error);
+            walk_tree(&path, depth + 1, expanded, visited, rows, error);
         }
     }
 }
@@ -385,6 +430,7 @@ fn walk_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Keymap;
 
     #[test]
     fn builds_tree_directories_first_and_expands_only_requested_dirs() {
@@ -415,5 +461,36 @@ mod tests {
         assert_eq!(FileTreeState::width_for(40), 0);
         assert_eq!(FileTreeState::width_for(60), 20);
         assert_eq!(FileTreeState::width_for(200), 36);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expanded_symlink_loop_does_not_duplicate_the_tree() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        symlink(root, sub.join("loop")).unwrap();
+
+        let (rows, _) = build_tree_rows(root, &[sub.clone(), sub.join("loop")]);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["sub", "loop", "a.txt"]);
+    }
+
+    #[test]
+    fn sync_layout_inset_tracks_explorer_visibility() {
+        let mut ed = Editor::new_headless_for_test(Keymap::Vim).unwrap();
+        let width = FileTreeState::width_for(ed.terminal.cols() as usize);
+
+        ed.engine.state.file_tree.visible = true;
+        ed.sync_layout_inset();
+        assert_eq!(ed.engine.window_layout.inset_left, width);
+
+        ed.engine.state.file_tree.visible = false;
+        ed.sync_layout_inset();
+        assert_eq!(ed.engine.window_layout.inset_left, 0);
     }
 }
