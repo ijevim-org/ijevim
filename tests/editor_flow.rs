@@ -3437,3 +3437,38 @@ async fn inner_bracket_object_across_lines_keeps_the_newlines() {
     send_keys(&mut ed, "di(").await;
     assert_eq!(ed.snapshot_for_test().0, "foo(\n)\n");
 }
+
+#[tokio::test]
+async fn file_tree_focus_falls_through_for_unhandled_keys() {
+    let mut ed = test_vim_editor("abc\n");
+    ed.engine.state.file_tree.visible = true;
+    ed.engine.state.file_tree.focused = true;
+
+    send_keys(&mut ed, "iX\u{1b}").await;
+
+    assert!(!ed.engine.state.file_tree.focused);
+    assert_eq!(ed.snapshot_for_test().0, "Xabc\n");
+}
+
+#[tokio::test]
+async fn file_tree_focus_allows_the_command_line() {
+    let mut ed = test_vim_editor("abc\n");
+    ed.engine.state.file_tree.focused = true;
+
+    send_keys(&mut ed, ":").await;
+
+    assert!(!ed.engine.state.file_tree.focused);
+    assert_eq!(ed.engine.state.mode, Mode::Command);
+}
+
+#[tokio::test]
+async fn file_tree_keeps_its_own_navigation_keys() {
+    let mut ed = test_vim_editor("abc\n");
+    ed.engine.state.file_tree.focused = true;
+
+    send_keys(&mut ed, "j").await;
+
+    assert!(ed.engine.state.file_tree.focused);
+    assert_eq!(ed.engine.state.mode, Mode::Normal);
+    assert_eq!(ed.snapshot_for_test().1, 1);
+}

@@ -138,29 +138,57 @@ impl Editor {
     }
 
     /// Handle a key while the sidebar has focus. Returns `true` when consumed.
+    ///
+    /// Anything the tree does not own drops focus so the key can reach the
+    /// editor keymap. Without this fall-through, starting without a file would
+    /// leave every key (including `i` and `:`) trapped in the sidebar.
     pub(crate) fn handle_file_tree_key(&mut self, key: KeyCode) -> bool {
-        match key {
-            KeyCode::Char('j') | KeyCode::Down => self.tree_move(1),
-            KeyCode::Char('k') | KeyCode::Up => self.tree_move(-1),
-            KeyCode::Char('h') | KeyCode::Left => self.tree_collapse(),
-            KeyCode::Char('l') | KeyCode::Right => self.tree_expand_selected(),
-            KeyCode::Enter | KeyCode::Char('o') => self.tree_open_selected(),
-            KeyCode::Char('g') => self.tree_select(0),
+        let consumed = match key {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.tree_move(1);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.tree_move(-1);
+                true
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.tree_collapse();
+                true
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.tree_expand_selected();
+                true
+            }
+            KeyCode::Enter | KeyCode::Char('o') => {
+                self.tree_open_selected();
+                true
+            }
+            KeyCode::Char('g') => {
+                self.tree_select(0);
+                true
+            }
             KeyCode::Char('G') => {
                 let last = self.engine.state.file_tree.rows.len().saturating_sub(1);
                 self.tree_select(last);
+                true
             }
             KeyCode::Char('r') => {
                 self.rebuild_file_tree();
                 self.tree_ensure_visible();
+                true
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.engine.state.file_tree.focused = false;
+                true
             }
-            _ => {}
+            _ => false,
+        };
+        if !consumed {
+            self.engine.state.file_tree.focused = false;
         }
         self.needs_render = true;
-        true
+        consumed
     }
 
     // ── Tree model ───────────────────────────────────────────────
